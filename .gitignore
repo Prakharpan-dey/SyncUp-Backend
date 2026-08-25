@@ -12,9 +12,6 @@ dist/
 # Firebase service account
 firebase-service-account.json
 
-# Database
-db/migrations/meta/
-
 # IDE
 .idea/
 .vscode/

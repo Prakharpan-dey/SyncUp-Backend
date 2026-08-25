@@ -10,11 +10,15 @@ const envSchema = z.object({
     REDIS_URL: z.string().url(),
 
     JWT_ACCESS_SECRET: z.string().min(32),
-    JWT_REFRESH_SECRET: z.string().min(32),
     JWT_ACCESS_EXPIRY: z.string().default('15m'),
     JWT_REFRESH_EXPIRY_DAYS: z.coerce.number().default(30),
 
-    GOOGLE_CLIENT_ID: z.string().optional(),
+    DATABASE_POOL_MAX: z.coerce.number().default(10),
+
+    // Base for links emailed to users (verification, password reset).
+    // Custom scheme by default so links open the app without a registered
+    // domain; switch to https://<your-domain> once App Links are verified.
+    PUBLIC_APP_URL: z.string().default('syncup://'),
 
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.coerce.number().optional(),
