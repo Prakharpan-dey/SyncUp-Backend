@@ -1,5 +1,6 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import formbody from '@fastify/formbody';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { env } from './core/config/env.js';
@@ -38,6 +39,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Security plugins
   await app.register(cors, { origin: false });
   await app.register(helmet);
+  // Parses urlencoded bodies, which the browser-facing password-reset form
+  // submits. Every other endpoint is JSON.
+  await app.register(formbody);
   // Redis-backed so counters survive restarts and are shared across replicas.
   await app.register(rateLimit, {
     max: 100,

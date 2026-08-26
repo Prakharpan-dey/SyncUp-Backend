@@ -35,15 +35,14 @@ function isUniqueViolation(error: unknown): boolean {
 /**
  * Builds a link for an email.
  *
- * `PUBLIC_APP_URL` is a custom scheme (`syncup://`) by default, which has no
- * host component — so the path is appended directly rather than resolved as a
- * URL, which would mangle it.
+ * These point at the API's own browser-facing routes rather than a `syncup://`
+ * deep link. An email link is opened from wherever the user reads their mail —
+ * desktop webmail, an in-app browser, a phone without the app — and a custom
+ * scheme renders as a blank page in all of those.
  */
-function buildAppLink(path: string, token: string): string {
-  const base = env.PUBLIC_APP_URL.endsWith('/')
-    ? env.PUBLIC_APP_URL
-    : `${env.PUBLIC_APP_URL}/`;
-  return `${base}${path}?token=${encodeURIComponent(token)}`;
+function buildEmailLink(path: string, token: string): string {
+  const base = env.PUBLIC_APP_URL.replace(/\/+$/, '');
+  return `${base}/auth/${path}?token=${encodeURIComponent(token)}`;
 }
 
 export class AuthService {
@@ -329,7 +328,7 @@ export class AuthService {
 
   private async sendVerificationEmail(user: typeof users.$inferSelect) {
     const raw = await this.authTokens.issue(user.id, 'email_verify');
-    const url = buildAppLink('auth/verify-email', raw);
+    const url = buildEmailLink('verify-email', raw);
     const { subject, html } = verificationEmail({
       displayName: user.displayName,
       url,
@@ -381,7 +380,7 @@ export class AuthService {
     // account was created.
     if (user?.passwordHash) {
       const raw = await this.authTokens.issue(user.id, 'password_reset');
-      const url = buildAppLink('auth/reset-password', raw);
+      const url = buildEmailLink('reset-password', raw);
       const { subject, html } = passwordResetEmail({
         displayName: user.displayName,
         url,

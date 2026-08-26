@@ -15,10 +15,10 @@ const envSchema = z.object({
 
     DATABASE_POOL_MAX: z.coerce.number().default(10),
 
-    // Base for links emailed to users (verification, password reset).
-    // Custom scheme by default so links open the app without a registered
-    // domain; switch to https://<your-domain> once App Links are verified.
-    PUBLIC_APP_URL: z.string().default('syncup://'),
+    // Public base URL of THIS API. Emailed verification and reset links point
+    // here, because they are completed in the browser — a custom scheme would
+    // render as a blank page in desktop webmail.
+    PUBLIC_APP_URL: z.string().url().default('http://localhost:3000'),
 
     // Resend's HTTP API key. Preferred over SMTP because many PaaS providers
     // (Railway included) block outbound SMTP ports entirely. Defaults to

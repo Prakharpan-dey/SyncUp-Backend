@@ -1,6 +1,13 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply } from 'fastify';
 import { authGuard } from '../../core/middleware/auth.middleware.js';
+import { AppError } from '../../core/errors/app-errors.js';
 import { AuthService } from './auth.service.js';
+import {
+  verifiedPage,
+  invalidTokenPage,
+  resetPasswordFormPage,
+  passwordResetDonePage,
+} from './emails/pages.js';
 import {
   signUpSchema,
   loginSchema,
@@ -13,6 +20,22 @@ import {
 } from './auth.schema.js';
 
 const service = new AuthService();
+
+/**
+ * Prepares a reply to render one of the self-contained HTML pages.
+ *
+ * Helmet's default policy blocks inline styles, and these pages are styled
+ * entirely with inline attributes. They load nothing external and run no
+ * scripts, so the policy below allows exactly what they need and nothing more.
+ */
+function htmlReply(reply: FastifyReply) {
+  return reply
+    .type('text/html; charset=utf-8')
+    .header(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    );
+}
 
 /**
  * Credential endpoints are brute-force targets, so they get a far tighter budget
@@ -101,6 +124,31 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
+  // Browser entry point — this is what the emailed link points at.
+  //
+  // Verification completes here rather than handing off to the app, because an
+  // email link has to work wherever it is opened: desktop webmail, an in-app
+  // browser, or a phone that does not have SyncUp installed.
+  app.get('/verify-email', {
+    config: { rateLimit: { max: 20, timeWindow: '15 minutes' } },
+  }, async (request, reply) => {
+    const token = (request.query as { token?: string }).token;
+    htmlReply(reply);
+
+    if (!token) return reply.status(400).send(invalidTokenPage('verification'));
+
+    try {
+      await service.confirmEmailVerification(token);
+      return reply.send(verifiedPage());
+    } catch (err) {
+      // A token already spent usually means the user tapped the link twice.
+      if (err instanceof AppError && err.code === 'INVALID_TOKEN') {
+        return reply.status(400).send(invalidTokenPage('verification'));
+      }
+      throw err;
+    }
+  });
+
   // ── Password reset ──
 
   // Always 202, regardless of whether the address is registered — a different
@@ -119,6 +167,57 @@ export async function authRoutes(app: FastifyInstance) {
     const body = resetPasswordSchema.parse(request.body);
     await service.resetPassword(body.token, body.password);
     return reply.status(204).send();
+  });
+
+  // Browser entry point for the emailed reset link — renders the form.
+  // The token is not consumed here, only when the form is submitted.
+  app.get('/reset-password', {
+    config: { rateLimit: { max: 20, timeWindow: '15 minutes' } },
+  }, async (request, reply) => {
+    const token = (request.query as { token?: string }).token;
+    htmlReply(reply);
+
+    if (!token) return reply.status(400).send(invalidTokenPage('reset'));
+    return reply.send(resetPasswordFormPage(token));
+  });
+
+  // Submission target for the form above. Accepts urlencoded rather than JSON,
+  // since it is a plain browser form post.
+  app.post('/reset-password/web', {
+    config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
+  }, async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, string>;
+    const { token, password, confirm } = body;
+    htmlReply(reply);
+
+    if (!token) return reply.status(400).send(invalidTokenPage('reset'));
+
+    // Re-render the form with the problem rather than dumping a JSON error at
+    // someone who is sitting in a browser.
+    const reject = (message: string) =>
+      reply.status(400).send(resetPasswordFormPage(token, message));
+
+    if (!password || password.length < 8) {
+      return reject('Password must be at least 8 characters.');
+    }
+    if (Buffer.byteLength(password, 'utf8') > 72) {
+      return reject('Password must be at most 72 bytes.');
+    }
+    if (password !== confirm) {
+      return reject('Those passwords do not match.');
+    }
+
+    try {
+      await service.resetPassword(token, password);
+      return reply.send(passwordResetDonePage());
+    } catch (err) {
+      if (err instanceof AppError) {
+        return err.code === 'INVALID_TOKEN'
+          ? reply.status(400).send(invalidTokenPage('reset'))
+          : reject(err.message);
+      }
+      throw err;
+    }
   });
 
   // POST /auth/change-password — protected
