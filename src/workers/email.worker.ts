@@ -2,34 +2,57 @@ import { Worker, Job } from 'bullmq';
 import { redis } from '../core/redis/redis.js';
 import { env } from '../core/config/env.js';
 
+const DEFAULT_PORT = 587;
+
 const worker = new Worker('email', async (job: Job) => {
   const { to, subject, html } = job.data;
 
-  // Only send if SMTP is configured
   if (!env.SMTP_HOST || !env.SMTP_USER) {
-    console.log(`[EmailWorker] SMTP not configured, skipping: ${subject} → ${to}`);
+    console.warn(
+      `[EmailWorker] SKIPPED "${subject}" → ${to}. ` +
+        `SMTP_HOST=${env.SMTP_HOST ? 'set' : 'MISSING'} ` +
+        `SMTP_USER=${env.SMTP_USER ? 'set' : 'MISSING'}. ` +
+        'Set these on the service running the worker, not just the API.',
+    );
     return;
   }
 
-  // Dynamic import to avoid crashes when nodemailer isn't needed
+  const port = env.SMTP_PORT ?? DEFAULT_PORT;
   const nodemailer = await import('nodemailer');
+
   const transporter = nodemailer.createTransport({
     host: env.SMTP_HOST,
-    port: env.SMTP_PORT ?? 587,
-    secure: false,
+    port,
+    // 465 is implicit TLS and needs secure:true; 587 is STARTTLS and needs
+    // secure:false. Hardcoding false meant port 465 spoke plaintext to a
+    // TLS-only socket and hung until it timed out (ETIMEDOUT on CONN).
+    secure: port === 465,
     auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    // Fail fast instead of sitting on a dead socket for two minutes.
+    connectionTimeout: 15_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
   });
 
-  await transporter.sendMail({
-    from: env.SMTP_FROM ?? 'SyncUp <noreply@syncup.app>',
-    to, subject, html,
-  });
+  const from = env.SMTP_FROM ?? 'SyncUp <onboarding@resend.dev>';
 
-  console.log(`[EmailWorker] Sent: ${subject} → ${to}`);
+  try {
+    const info = await transporter.sendMail({ from, to, subject, html });
+    console.log(`[EmailWorker] Sent "${subject}" → ${to} (id: ${info.messageId})`);
+  } catch (err) {
+    // Providers reject unverified sender domains, so surface `from` — it is the
+    // usual culprit and is invisible from the job payload alone.
+    console.error(
+      `[EmailWorker] FAILED "${subject}" → ${to} | from=${from} ` +
+        `host=${env.SMTP_HOST}:${port} secure=${port === 465}`,
+      err,
+    );
+    throw err; // let BullMQ record the failure and retry
+  }
 }, { connection: redis });
 
 worker.on('failed', (job, err) => {
-  console.error(`[EmailWorker] Job ${job?.id} failed:`, err);
+  console.error(`[EmailWorker] Job ${job?.id} failed:`, err?.message ?? err);
 });
 
 export default worker;
