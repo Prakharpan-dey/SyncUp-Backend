@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
-import { users, refreshTokens, groups, groupMembers } from '../../core/db/schema/index.js';
-import { eq, and, ne, sql } from 'drizzle-orm';
+import { users, refreshTokens, groups, groupMembers, userDevices } from '../../core/db/schema/index.js';
+import { eq, and, ne, desc, lt, or, sql } from 'drizzle-orm';
 import { hashPassword, comparePassword } from '../../core/utils/password.js';
 import { signAccessToken, generateRefreshToken, hashToken } from '../../core/utils/token.js';
 import { invalidateAccountCache } from '../../core/middleware/auth.middleware.js';
@@ -12,6 +12,15 @@ import { verificationEmail, passwordResetEmail } from './emails/templates.js';
 
 /** The transaction handle Drizzle hands to `db.transaction`. */
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * How long a just-rotated refresh token still works.
+ *
+ * Two parallel refreshes from the same client, or a request retried after the
+ * device came back online, will present a token revoked seconds ago. Without a
+ * window that trips reuse detection and signs the user out everywhere.
+ */
+const REFRESH_REUSE_GRACE_MS = 15_000;
 
 /**
  * A throwaway hash to compare against when no account matches, so a failed
@@ -149,7 +158,13 @@ export class AuthService {
 
   /**
    * Refresh token rotation with reuse detection.
-   * If a revoked token is replayed → ALL tokens for that user are revoked.
+   *
+   * Replaying a token that was already rotated away normally means it was
+   * stolen, so every session for that user is killed. The exception is the
+   * grace window below: a client that fired two refreshes at once, or retried
+   * a request queued while offline, will legitimately present a token that was
+   * revoked moments ago. Treating that as theft would sign honest users out of
+   * every device at random.
    */
   async refresh(token: string) {
     const tokenHash = hashToken(token);
@@ -163,13 +178,53 @@ export class AuthService {
       throw new AppError(401, 'Invalid refresh token', 'UNAUTHORIZED');
     }
 
-    // REUSE DETECTION: if token was already revoked, attacker replaying → revoke ALL
     if (stored.isRevoked) {
-      await db
-        .update(refreshTokens)
-        .set({ isRevoked: true })
-        .where(eq(refreshTokens.userId, stored.userId));
-      throw new AppError(401, 'Refresh token reuse detected. All sessions revoked.', 'TOKEN_REUSE');
+      const revokedMsAgo = stored.revokedAt
+        ? Date.now() - stored.revokedAt.getTime()
+        : Number.POSITIVE_INFINITY;
+
+      if (revokedMsAgo > REFRESH_REUSE_GRACE_MS) {
+        await db
+          .update(refreshTokens)
+          .set({ isRevoked: true, revokedAt: new Date() })
+          .where(eq(refreshTokens.userId, stored.userId));
+        throw new AppError(
+          401,
+          'Refresh token reuse detected. All sessions revoked.',
+          'TOKEN_REUSE',
+        );
+      }
+
+      // Inside the window: hand back the live token for this session rather
+      // than minting another, so concurrent refreshes converge instead of
+      // racing each other into a reuse trip.
+      const [current] = await db
+        .select()
+        .from(refreshTokens)
+        .where(and(
+          eq(refreshTokens.sessionId, stored.sessionId),
+          eq(refreshTokens.isRevoked, false),
+        ))
+        .limit(1);
+
+      if (!current || current.expiresAt < new Date()) {
+        throw new AppError(401, 'Refresh token expired', 'UNAUTHORIZED');
+      }
+
+      // The raw token is unrecoverable from its hash, so the session is
+      // re-issued instead — same sessionId, so this stays one device.
+      await db.update(refreshTokens)
+        .set({ isRevoked: true, revokedAt: new Date() })
+        .where(eq(refreshTokens.id, current.id));
+
+      const reissued = await this.generateTokenPair(stored.userId, {
+        sessionId: stored.sessionId,
+        deviceLabel: stored.deviceLabel,
+      });
+      return {
+        access_token: reissued.accessToken,
+        refresh_token: reissued.refreshToken,
+      };
     }
 
     // Token expired
@@ -177,14 +232,18 @@ export class AuthService {
       throw new AppError(401, 'Refresh token expired', 'UNAUTHORIZED');
     }
 
-    // Rotate: revoke old, issue new
+    // Rotate: revoke old, issue new — carrying the session forward so this
+    // stays the same device.
     await db
       .update(refreshTokens)
-      .set({ isRevoked: true })
+      .set({ isRevoked: true, revokedAt: new Date() })
       .where(eq(refreshTokens.id, stored.id));
 
     const { accessToken, refreshToken: newRefreshToken } =
-      await this.generateTokenPair(stored.userId);
+      await this.generateTokenPair(stored.userId, {
+        sessionId: stored.sessionId,
+        deviceLabel: stored.deviceLabel,
+      });
 
     return {
       access_token: accessToken,
@@ -192,12 +251,132 @@ export class AuthService {
     };
   }
 
-  async logout(userId: string) {
-    // Revoke all refresh tokens for this user
+  /**
+   * Signs out one device.
+   *
+   * Previously this revoked every token the user had, so logging out on a phone
+   * silently killed the tablet and laptop too. Now only the presented token's
+   * session ends; `logoutAll` remains for the deliberate case.
+   *
+   * The push token for that device is dropped as well — otherwise a signed-out
+   * phone keeps receiving the previous user's notifications, which on a shared
+   * device leaks them to whoever signs in next.
+   */
+  async logout(userId: string, refreshToken?: string, fcmToken?: string) {
+    if (fcmToken) {
+      await db.delete(userDevices).where(and(
+        eq(userDevices.token, fcmToken),
+        eq(userDevices.userId, userId),
+      ));
+    }
+
+    if (!refreshToken) {
+      // No token supplied — an older client, or the token was already lost.
+      // Ending every session is the safe reading of "log me out".
+      return this.logoutAll(userId);
+    }
+
+    const [stored] = await db
+      .select({ sessionId: refreshTokens.sessionId })
+      .from(refreshTokens)
+      .where(and(
+        eq(refreshTokens.tokenHash, hashToken(refreshToken)),
+        eq(refreshTokens.userId, userId),
+      ))
+      .limit(1);
+
+    // An unrecognised token is already useless; nothing to do.
+    if (!stored) return;
+
     await db
       .update(refreshTokens)
-      .set({ isRevoked: true })
+      .set({ isRevoked: true, revokedAt: new Date() })
+      .where(eq(refreshTokens.sessionId, stored.sessionId));
+  }
+
+  /** Ends every session for the user, on every device. */
+  async logoutAll(userId: string) {
+    await db
+      .update(refreshTokens)
+      .set({ isRevoked: true, revokedAt: new Date() })
       .where(eq(refreshTokens.userId, userId));
+
+    await db.delete(userDevices).where(eq(userDevices.userId, userId));
+  }
+
+  /**
+   * Sessions for a "signed in devices" screen.
+   *
+   * Grouped by session rather than by token, since rotation creates a new row
+   * every 15 minutes and listing those would be meaningless.
+   */
+  async listSessions(userId: string, currentRefreshToken?: string) {
+    const rows = await db
+      .select({
+        sessionId: refreshTokens.sessionId,
+        deviceLabel: refreshTokens.deviceLabel,
+        createdAt: refreshTokens.createdAt,
+        expiresAt: refreshTokens.expiresAt,
+      })
+      .from(refreshTokens)
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        eq(refreshTokens.isRevoked, false),
+      ))
+      .orderBy(desc(refreshTokens.createdAt));
+
+    let currentSessionId: string | null = null;
+    if (currentRefreshToken) {
+      const [current] = await db
+        .select({ sessionId: refreshTokens.sessionId })
+        .from(refreshTokens)
+        .where(eq(refreshTokens.tokenHash, hashToken(currentRefreshToken)))
+        .limit(1);
+      currentSessionId = current?.sessionId ?? null;
+    }
+
+    const seen = new Set<string>();
+    return rows
+      .filter((r) => r.expiresAt > new Date())
+      .filter((r) => (seen.has(r.sessionId) ? false : seen.add(r.sessionId)))
+      .map((r) => ({
+        session_id: r.sessionId,
+        device_label: r.deviceLabel,
+        signed_in_at: r.createdAt.toISOString(),
+        is_current: r.sessionId === currentSessionId,
+      }));
+  }
+
+  /** Revokes one session by id — the "sign out this device" action. */
+  async revokeSession(userId: string, sessionId: string) {
+    const revoked = await db
+      .update(refreshTokens)
+      .set({ isRevoked: true, revokedAt: new Date() })
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        eq(refreshTokens.sessionId, sessionId),
+      ))
+      .returning({ id: refreshTokens.id });
+
+    if (revoked.length === 0) {
+      throw new AppError(404, 'Session not found', 'NOT_FOUND');
+    }
+  }
+
+  /**
+   * Registers a device for push, taking ownership of the token.
+   *
+   * The token is unique across the table, so claiming one already registered
+   * to another account moves it. Without that, anyone could submit a victim's
+   * token and have notifications delivered to their phone.
+   */
+  async registerDevice(userId: string, token: string, platform: 'android' | 'ios' | 'web') {
+    await db.insert(userDevices)
+      .values({ userId, token, platform, lastSeenAt: new Date() })
+      .onConflictDoUpdate({
+        target: userDevices.token,
+        set: { userId, platform, lastSeenAt: new Date() },
+      });
   }
 
   /**
@@ -459,7 +638,14 @@ export class AuthService {
 
   // ── Private helpers ──
 
-  private async generateTokenPair(userId: string) {
+  /**
+   * @param session carried forward on rotation so a device keeps one identity
+   *   across refreshes; omitted at sign-in, where a new session begins.
+   */
+  private async generateTokenPair(
+    userId: string,
+    session?: { sessionId?: string; deviceLabel?: string | null },
+  ) {
     const accessToken = signAccessToken(userId);
     const refreshToken = generateRefreshToken();
 
@@ -467,6 +653,9 @@ export class AuthService {
       userId,
       tokenHash: hashToken(refreshToken),
       expiresAt: new Date(Date.now() + this.refreshExpiryMs),
+      // Left undefined at sign-in so the column default mints a fresh one.
+      ...(session?.sessionId ? { sessionId: session.sessionId } : {}),
+      deviceLabel: session?.deviceLabel ?? null,
     });
 
     return { accessToken, refreshToken };

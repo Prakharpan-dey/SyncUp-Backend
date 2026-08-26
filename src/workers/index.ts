@@ -14,12 +14,20 @@ import { redis } from '../core/redis/redis.js';
 import emailWorker from './email.worker.js';
 import feedWorker from './feed.worker.js';
 import notificationWorker from './notification.worker.js';
+import cleanupWorker, { scheduleCleanup } from './cleanup.worker.js';
 
 const workers = [
   { name: 'email', worker: emailWorker },
   { name: 'feed', worker: feedWorker },
   { name: 'notifications', worker: notificationWorker },
+  { name: 'cleanup', worker: cleanupWorker },
 ];
+
+// Idempotent: the repeatable job uses a stable id, so restarts and extra
+// replicas will not stack duplicates.
+void scheduleCleanup().catch((err) => {
+  console.error('[Workers] Failed to schedule cleanup job:', err);
+});
 
 console.log(
   `[Workers] Started: ${workers.map((w) => w.name).join(', ')} [${env.NODE_ENV}]`,

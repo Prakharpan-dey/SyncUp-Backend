@@ -26,7 +26,6 @@ export class UsersService {
     if (fields.privacy_searchable) updateData.privacySearchable = fields.privacy_searchable;
     if (fields.privacy_sharing_default) updateData.privacySharingDefault = fields.privacy_sharing_default;
     if (fields.notification_settings) updateData.notificationSettings = fields.notification_settings;
-    if (fields.fcm_token !== undefined) updateData.fcmToken = fields.fcm_token;
 
     const [updated] = await db
       .update(users)

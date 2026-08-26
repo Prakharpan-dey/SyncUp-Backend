@@ -50,6 +50,25 @@ export const deleteAccountSchema = z.object({
   password: z.string().min(1).max(1024),
 });
 
+/**
+ * Logout ends only the presented session. Both fields are optional so an older
+ * client that sends nothing still logs out — of everything, in that case.
+ */
+export const logoutSchema = z.object({
+  refresh_token: z.string().min(1).max(255).optional(),
+  /** Push token to detach, so a signed-out device stops receiving alerts. */
+  fcm_token: z.string().min(1).max(255).optional(),
+});
+
+export const registerDeviceSchema = z.object({
+  fcm_token: z.string().min(1).max(255),
+  platform: z.enum(['android', 'ios', 'web']),
+});
+
+export const sessionIdParamSchema = z.object({
+  sessionId: z.string().uuid(),
+});
+
 export const emailOnlySchema = z.object({
   email: emailField,
 });

@@ -17,6 +17,9 @@ import {
   confirmTokenSchema,
   resetPasswordSchema,
   changePasswordSchema,
+  logoutSchema,
+  registerDeviceSchema,
+  sessionIdParamSchema,
 } from './auth.schema.js';
 
 const service = new AuthService();
@@ -83,9 +86,39 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
-  // POST /auth/logout — protected
+  // POST /auth/logout — protected. Ends only this device's session.
   app.post('/logout', { preHandler: [authGuard] }, async (request, reply) => {
-    await service.logout(request.userId);
+    const body = logoutSchema.parse(request.body ?? {});
+    await service.logout(request.userId, body.refresh_token, body.fcm_token);
+    return reply.status(204).send();
+  });
+
+  // POST /auth/logout-all — protected. Ends every session, everywhere.
+  app.post('/logout-all', { preHandler: [authGuard] }, async (request, reply) => {
+    await service.logoutAll(request.userId);
+    return reply.status(204).send();
+  });
+
+  // GET /auth/sessions — protected. Backs a "signed in devices" screen.
+  app.get('/sessions', { preHandler: [authGuard] }, async (request, reply) => {
+    const token = (request.query as { refresh_token?: string }).refresh_token;
+    const sessions = await service.listSessions(request.userId, token);
+    return reply.send({ sessions });
+  });
+
+  // DELETE /auth/sessions/:sessionId — protected. Sign out one other device.
+  app.delete('/sessions/:sessionId', {
+    preHandler: [authGuard],
+  }, async (request, reply) => {
+    const { sessionId } = sessionIdParamSchema.parse(request.params);
+    await service.revokeSession(request.userId, sessionId);
+    return reply.status(204).send();
+  });
+
+  // POST /auth/devices — protected. Registers this device for push.
+  app.post('/devices', { preHandler: [authGuard] }, async (request, reply) => {
+    const body = registerDeviceSchema.parse(request.body);
+    await service.registerDevice(request.userId, body.fcm_token, body.platform);
     return reply.status(204).send();
   });
 

@@ -22,7 +22,8 @@ export const users = pgTable('users', {
   privacySearchable: privacySearchableEnum('privacy_searchable').default('everyone').notNull(),
   privacySharingDefault: privacySharingEnum('privacy_sharing_default').default('summary').notNull(),
   notificationSettings: jsonb('notification_settings').default({}),
-  fcmToken: varchar('fcm_token', { length: 255 }),
+  // Push targets live in `user_devices`, not here. A single column meant only
+  // the most recently signed-in device could receive notifications.
   // No is_deleted column: deletion is a real DELETE. A soft-delete flag has to
   // be remembered at every read site, and five of them had already forgotten it
   // — leaving deleted users visible in group member lists, pending requests and
