@@ -20,6 +20,11 @@ const envSchema = z.object({
     // domain; switch to https://<your-domain> once App Links are verified.
     PUBLIC_APP_URL: z.string().default('syncup://'),
 
+    // Resend's HTTP API key. Preferred over SMTP because many PaaS providers
+    // (Railway included) block outbound SMTP ports entirely. Defaults to
+    // SMTP_PASS when the host is Resend, since it is the same credential.
+    RESEND_API_KEY: z.string().optional(),
+
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.coerce.number().optional(),
     SMTP_USER: z.string().optional(),
