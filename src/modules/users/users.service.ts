@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
 import { users, friendships } from '../../core/db/schema/index.js';
-import { eq, and, or, ilike, ne, exists, notExists, sql } from 'drizzle-orm';
+import { eq, and, or, ne, exists, notExists, sql } from 'drizzle-orm';
 import { AppError } from '../../core/errors/app-errors.js';
 
 export class UsersService {
@@ -37,13 +37,23 @@ export class UsersService {
     return this.sanitize(updated);
   }
 
+  /// Looks up a single user by their exact username.
+  ///
+  /// Deliberately not a directory search. SyncUp is a study tool, not a social
+  /// network: you add someone because you already know their handle. Matching
+  /// substrings of usernames and display names let anyone page through the
+  /// whole user base a few characters at a time, which is a privacy problem
+  /// with no upside here.
+  ///
+  /// Matching is case-insensitive because usernames are unique on
+  /// lower(username), so `Prakhar` and `prakhar` are necessarily the same
+  /// account. The uq_users_username_lower index serves this directly.
   async searchUsers(query: string, currentUserId: string) {
-    // Escape LIKE metacharacters so a query of '%' cannot match every user and
-    // page through the entire searchable directory.
-    const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`);
+    const handle = query.trim().toLowerCase();
+    if (handle.length === 0) return [];
 
-    // Correlated on users.id, so it is evaluated per candidate row rather than
-    // needing the caller's whole friend list up front.
+    // Correlated on users.id, so it is evaluated for the candidate row rather
+    // than needing the caller's whole friend list up front.
     const isFriendOfCaller = exists(
       db
         .select({ one: sql`1` })
@@ -66,12 +76,10 @@ export class UsersService {
         ),
     );
 
-    // A block hides the pair from each other's search in both directions: the
-    // blocker should not have to keep seeing them, and the blocked party must
-    // not be able to find the blocker to try again under a new request. Only
-    // sendFriendRequest checked for blocks before, so the target still turned
-    // up here and the block was only enforced at the last step.
-    const blockedEitherWay = notExists(
+    // A block hides the pair from each other in both directions: the blocker
+    // should not have to keep seeing them, and the blocked party must not be
+    // able to find the blocker to try again under a new request.
+    const notBlockedEitherWay = notExists(
       db
         .select({ one: sql`1` })
         .from(friendships)
@@ -98,11 +106,8 @@ export class UsersService {
       .where(
         and(
           ne(users.id, currentUserId),
-          blockedEitherWay,
-          or(
-            ilike(users.username, `%${escaped}%`),
-            ilike(users.displayName, `%${escaped}%`),
-          ),
+          eq(sql`lower(${users.username})`, handle),
+          notBlockedEitherWay,
           // 'friends' used to fall through this filter and behave exactly like
           // 'none', so anyone who picked "Friends only" became invisible to
           // their own friends with nothing to indicate it.
@@ -112,7 +117,7 @@ export class UsersService {
           ),
         ),
       )
-      .limit(20);
+      .limit(1);
 
     return results.map((u) => ({
       id: u.id,
