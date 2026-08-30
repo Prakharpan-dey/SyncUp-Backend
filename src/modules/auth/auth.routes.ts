@@ -75,7 +75,11 @@ export async function authRoutes(app: FastifyInstance) {
   // POST /auth/login — public
   app.post('/login', credentialRateLimit, async (request, reply) => {
     const body = loginSchema.parse(request.body);
-    const result = await service.login(body.email, body.password);
+    const result = await service.login(
+      body.email,
+      body.password,
+      body.device_label,
+    );
     return reply.send(result);
   });
 

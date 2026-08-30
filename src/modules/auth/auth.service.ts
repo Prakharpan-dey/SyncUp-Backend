@@ -66,6 +66,7 @@ export class AuthService {
     password: string;
     username: string;
     display_name: string;
+    device_label?: string;
   }) {
     // Check email uniqueness
     const existingEmail = await db
@@ -113,7 +114,9 @@ export class AuthService {
     }
 
     // Generate tokens
-    const { accessToken, refreshToken } = await this.generateTokenPair(user.id);
+    const { accessToken, refreshToken } = await this.generateTokenPair(user.id, {
+      deviceLabel: data.device_label ?? null,
+    });
 
     // Fire-and-forget: a mail failure must not fail the signup. The user is
     // already able to use tasks and attendance; verification only gates the
@@ -129,7 +132,7 @@ export class AuthService {
     };
   }
 
-  async login(email: string, password: string) {
+  async login(email: string, password: string, deviceLabel?: string) {
     const [user] = await db
       .select()
       .from(users)
@@ -147,7 +150,9 @@ export class AuthService {
       throw new AppError(401, 'Invalid credentials', 'UNAUTHORIZED');
     }
 
-    const { accessToken, refreshToken } = await this.generateTokenPair(user.id);
+    const { accessToken, refreshToken } = await this.generateTokenPair(user.id, {
+      deviceLabel: deviceLabel ?? null,
+    });
 
     return {
       user: this.sanitizeUser(user),

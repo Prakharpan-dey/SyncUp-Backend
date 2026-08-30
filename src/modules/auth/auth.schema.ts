@@ -25,12 +25,23 @@ const passwordField = z
     `Password must be at most ${MAX_PASSWORD_BYTES} bytes`,
   );
 
+/**
+ * Cosmetic name for the "signed in devices" list, e.g. "Pixel 8 Pro · Android 15".
+ *
+ * Optional because older clients do not send one, and nothing is authorised on
+ * the strength of it — it only helps a user recognise which row to sign out.
+ * It is rendered back to that same user, so it is length-capped to match the
+ * column and left otherwise unconstrained.
+ */
+const deviceLabelField = z.string().trim().min(1).max(120).optional();
+
 export const signUpSchema = z.object({
   email: emailField,
   password: passwordField,
   username: z.string().trim().min(3).max(40).regex(/^[a-zA-Z0-9_]+$/,
     'Username can only contain letters, numbers, and underscores'),
   display_name: z.string().trim().min(1).max(80),
+  device_label: deviceLabelField,
 });
 
 export const loginSchema = z.object({
@@ -39,6 +50,7 @@ export const loginSchema = z.object({
   // cheap CPU-exhaustion vector. Length is not otherwise validated here —
   // a wrong password should fail as a credential mismatch, not a 422.
   password: z.string().min(1).max(1024),
+  device_label: deviceLabelField,
 });
 
 export const refreshSchema = z.object({
