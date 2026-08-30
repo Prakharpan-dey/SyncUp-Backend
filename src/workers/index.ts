@@ -37,6 +37,13 @@ if (!env.SMTP_HOST) {
   );
 }
 
+if (!process.env.FIREBASE_SERVICE_ACCOUNT && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  console.warn(
+    '[Workers] No Firebase credentials — notifications will be stored but not pushed. ' +
+      'Set FIREBASE_SERVICE_ACCOUNT to the service account JSON to enable delivery.',
+  );
+}
+
 async function shutdown(signal: string) {
   console.log(`[Workers] Received ${signal}, closing...`);
   stopCleanupSchedule();
