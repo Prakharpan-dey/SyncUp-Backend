@@ -4,6 +4,11 @@ import { env } from '../config/env.js';
 const baseOptions: RedisOptions = {
   maxRetriesPerRequest: null, // Required by BullMQ
   enableReadyCheck: false,
+  // TCP keepalive. Workers sit on blocking reads for long stretches, and an
+  // idle socket is exactly what proxies and load balancers reap — Railway's
+  // public TCP proxy resets them (ECONNRESET). Keepalives make the connection
+  // visibly alive so it survives the wait.
+  keepAlive: 15_000,
 };
 
 /**
@@ -38,8 +43,15 @@ export function createWorkerConnection(): Redis {
  * instant a job is enqueued; it just waits longer between empty polls.
  */
 export const workerPollingOptions = {
-  /** Seconds to block waiting for a job. 5s default → ~12x fewer idle reads. */
-  drainDelay: 60,
+  /**
+   * Seconds to block waiting for a job. The 5s default is the expensive part.
+   *
+   * Kept at 30 rather than pushed higher: a blocking read holds the socket idle
+   * for its whole duration, and proxies commonly reap idle connections at
+   * around 60s. 60 produced ECONNRESET against Railway's public TCP proxy. 30
+   * still cuts idle reads 6x while staying comfortably inside that window.
+   */
+  drainDelay: 30,
   /** How often to reclaim jobs from crashed workers. Default is 30s. */
   stalledInterval: 300_000,
 } as const;
