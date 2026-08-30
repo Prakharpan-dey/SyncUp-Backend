@@ -41,6 +41,7 @@ const GLYPHS = {
   check: '<path d="M5 13.5 10.5 19 21 6.5" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square"/>',
   cross: '<path d="M6.5 6.5 19.5 19.5M19.5 6.5 6.5 19.5" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="square"/>',
   lock: '<path d="M6 12h14v10H6z" fill="none" stroke="currentColor" stroke-width="3"/><path d="M9.5 12V8.5a3.5 3.5 0 0 1 7 0V12" fill="none" stroke="currentColor" stroke-width="3"/>',
+  trash: '<path d="M6 8h14M11 8V5.5h4V8M8 8v13h10V8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="square"/>',
 } as const;
 
 function iconBlock(glyph: keyof typeof GLYPHS, background: string, ink: string) {
@@ -150,5 +151,61 @@ export function passwordResetDonePage(): string {
     accent: GREEN,
     heading: 'Password changed',
     body: 'Sign in to SyncUp with your new password.',
+  });
+}
+
+/**
+ * Public account-deletion form.
+ *
+ * Google Play requires a deletion route reachable without installing the app,
+ * so this authenticates with email and password rather than a session. The
+ * typed confirmation mirrors the in-app screen — it is a deliberateness check,
+ * not a security one; the password is what actually gates the action.
+ */
+export function deleteAccountFormPage(error?: string): string {
+  const errorBlock = error
+    ? `<p style="margin:0 0 20px;padding:12px 14px;background:${RED};border:3px solid ${INK};font-size:14.5px;font-weight:600;color:${INK};">${escapeHtml(error)}</p>`
+    : '';
+
+  return shell({
+    glyph: 'trash',
+    accent: RED,
+    heading: 'Delete your account',
+    body: 'This removes your tasks, attendance records, friends and group memberships immediately. It cannot be undone.',
+    extra: `
+    <div style="margin-top:24px;padding:14px 16px;background:${PAPER};border:3px solid ${INK};">
+      <p style="margin:0;font-size:14px;line-height:1.5;color:#3A3A3A;">
+        Your email address and username are released, so you can sign up again later if you change your mind.
+      </p>
+    </div>
+
+    <form method="POST" action="/account/delete" style="margin-top:24px;">
+      ${errorBlock}
+      <label for="email" style="${LABEL_STYLE}">Email</label>
+      <input id="email" type="email" name="email" required autocomplete="email"
+        autofocus style="${INPUT_STYLE}margin-bottom:20px;">
+
+      <label for="password" style="${LABEL_STYLE}">Password</label>
+      <input id="password" type="password" name="password" required
+        autocomplete="current-password" style="${INPUT_STYLE}margin-bottom:20px;">
+
+      <label for="confirm" style="${LABEL_STYLE}">Type DELETE to confirm</label>
+      <input id="confirm" type="text" name="confirm" required autocomplete="off"
+        spellcheck="false" style="${INPUT_STYLE}margin-bottom:26px;">
+
+      <button type="submit"
+        style="width:100%;padding:16px;background:${RED};color:${INK};border:4px solid ${INK};border-radius:0;box-shadow:6px 6px 0 ${INK};font-family:${MONO_FONT};font-size:13px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;">
+        Delete my account
+      </button>
+    </form>`,
+  });
+}
+
+export function accountDeletedPage(): string {
+  return shell({
+    glyph: 'check',
+    accent: GREEN,
+    heading: 'Account deleted',
+    body: 'Your account and everything in it has been removed. Your email address is free to use again if you ever want to come back.',
   });
 }

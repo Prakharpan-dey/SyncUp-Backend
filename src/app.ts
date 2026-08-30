@@ -7,6 +7,7 @@ import { env } from './core/config/env.js';
 import { redis } from './core/redis/redis.js';
 import { errorHandler } from './core/middleware/error-handler.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
+import { accountRoutes } from './modules/account/account.routes.js';
 import { userRoutes } from './modules/users/users.routes.js';
 import { taskRoutes } from './modules/tasks/tasks.routes.js';
 import { attendanceRoutes } from './modules/attendance/attendance.routes.js';
@@ -47,6 +48,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     max: 100,
     timeWindow: '1 minute',
     redis,
+    // Without this, a Redis outage takes the whole API down — every request,
+    // including /health, fails on the store lookup before reaching a handler.
+    // Degrading to unlimited is far better than being unavailable; the outage
+    // is logged loudly so it does not pass unnoticed.
+    skipOnError: true,
   });
 
   // Global error handler
@@ -57,6 +63,9 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Route modules
   await app.register(authRoutes, { prefix: '/auth' });
+  // Public, no session required — Play Store needs a deletion URL that works
+  // without installing the app.
+  await app.register(accountRoutes, { prefix: '/account' });
   await app.register(userRoutes, { prefix: '/users' });
   await app.register(taskRoutes, { prefix: '/tasks' });
   await app.register(attendanceRoutes, { prefix: '/subjects' });

@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import { redis } from '../core/redis/redis.js';
+import { createWorkerConnection, workerPollingOptions } from '../core/redis/redis.js';
 import { env } from '../core/config/env.js';
 
 const DEFAULT_PORT = 587;
@@ -102,7 +102,7 @@ const worker = new Worker('email', async (job: Job) => {
     );
     throw err; // let BullMQ record the failure and retry
   }
-}, { connection: redis });
+}, { connection: createWorkerConnection(), ...workerPollingOptions });
 
 worker.on('failed', (job, err) => {
   console.error(`[EmailWorker] Job ${job?.id} failed:`, err?.message ?? err);

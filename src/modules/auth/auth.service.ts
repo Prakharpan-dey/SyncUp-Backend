@@ -410,6 +410,39 @@ export class AuthService {
       if (!valid) throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
     }
 
+    await this.performDeletion(userId);
+  }
+
+  /**
+   * Deletion entry point for the public web form.
+   *
+   * Google Play requires an account-deletion route reachable without installing
+   * the app, so this authenticates by email and password rather than a session.
+   * Errors are deliberately identical for an unknown address and a wrong
+   * password — an unauthenticated endpoint that distinguishes them tells an
+   * attacker which emails are registered.
+   */
+  async deleteAccountByCredentials(email: string, password: string) {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
+    // Always spend a comparison so a missing account and a wrong password take
+    // the same time, matching the reasoning in `login`.
+    const hashToCompare = user?.passwordHash ?? (await dummyPasswordHash());
+    const valid = await comparePassword(password, hashToCompare);
+
+    if (!user || !user.passwordHash || !valid) {
+      throw new AppError(401, 'Invalid email or password', 'UNAUTHORIZED');
+    }
+
+    await this.performDeletion(user.id);
+  }
+
+  /** The deletion itself, shared by the in-app and web entry points. */
+  private async performDeletion(userId: string) {
     await db.transaction(async (tx) => {
       await this.reassignOwnedGroups(tx, userId);
       await this.scrubUserFromFeedInteractions(tx, userId);

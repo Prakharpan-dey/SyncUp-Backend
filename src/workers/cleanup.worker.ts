@@ -1,11 +1,7 @@
-import { Worker, Queue, Job } from 'bullmq';
 import { and, eq, lt, or } from 'drizzle-orm';
 
-import { redis } from '../core/redis/redis.js';
 import { db } from '../core/db/drizzle.js';
 import { refreshTokens, authTokens } from '../core/db/schema/index.js';
-
-const QUEUE = 'cleanup';
 
 /**
  * Revoked rows are kept briefly so reuse detection can still recognise a
@@ -13,29 +9,24 @@ const QUEUE = 'cleanup';
  */
 const REVOKED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-export const cleanupQueue = new Queue(QUEUE, { connection: redis });
+const RUN_EVERY_MS = 24 * 60 * 60 * 1000;
+/** Let the process finish booting before the first sweep. */
+const FIRST_RUN_DELAY_MS = 60_000;
 
 /**
- * Nothing pruned these tables before, and both grow with every session.
+ * Prunes token tables. Deliberately a plain timer rather than a BullMQ queue.
  *
- * With 15-minute access tokens over a 30-day refresh window, one active device
- * produces roughly 2,800 dead `refresh_tokens` rows a month — on a table whose
- * hottest query runs on every refresh.
+ * A queue would mean a fourth Worker blocking on Redis around the clock purely
+ * to deliver one job a day — on a per-command Redis plan that costs far more
+ * than the work. The sweep is idempotent (it deletes rows that are already
+ * past their expiry), so it is harmless if two replicas both run it, which is
+ * the only thing the queue was buying.
+ *
+ * Nothing pruned these tables before. With 15-minute access tokens over a
+ * 30-day refresh window, one active device leaves roughly 2,800 dead
+ * `refresh_tokens` rows a month — on the table with the hottest query.
  */
-export async function scheduleCleanup() {
-  await cleanupQueue.add(
-    'prune-tokens',
-    {},
-    {
-      repeat: { pattern: '0 4 * * *' }, // daily, 04:00
-      jobId: 'prune-tokens', // stable id: re-registering will not stack duplicates
-      removeOnComplete: true,
-      removeOnFail: 50,
-    },
-  );
-}
-
-const worker = new Worker(QUEUE, async (_job: Job) => {
+export async function pruneTokens(): Promise<void> {
   const now = new Date();
   const revokedCutoff = new Date(now.getTime() - REVOKED_RETENTION_MS);
 
@@ -58,13 +49,27 @@ const worker = new Worker(QUEUE, async (_job: Job) => {
     .returning({ id: authTokens.id });
 
   console.log(
-    `[CleanupWorker] Pruned ${prunedRefresh.length} refresh token(s), ` +
+    `[Cleanup] Pruned ${prunedRefresh.length} refresh token(s), ` +
       `${prunedAuth.length} auth token(s)`,
   );
-}, { connection: redis });
+}
 
-worker.on('failed', (job, err) => {
-  console.error(`[CleanupWorker] Job ${job?.id} failed:`, err?.message ?? err);
-});
+let timer: NodeJS.Timeout | null = null;
 
-export default worker;
+export function startCleanupSchedule(): void {
+  const run = () => {
+    void pruneTokens().catch((err) => {
+      console.error('[Cleanup] Sweep failed:', err instanceof Error ? err.message : err);
+    });
+  };
+
+  setTimeout(run, FIRST_RUN_DELAY_MS).unref();
+  timer = setInterval(run, RUN_EVERY_MS);
+  // Do not hold the process open on this timer alone.
+  timer.unref();
+}
+
+export function stopCleanupSchedule(): void {
+  if (timer) clearInterval(timer);
+  timer = null;
+}

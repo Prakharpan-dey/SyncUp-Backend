@@ -1,7 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { inArray } from 'drizzle-orm';
 
-import { redis } from '../core/redis/redis.js';
+import { createWorkerConnection, workerPollingOptions } from '../core/redis/redis.js';
 import { db } from '../core/db/drizzle.js';
 import { notifications, userDevices } from '../core/db/schema/index.js';
 import { eq } from 'drizzle-orm';
@@ -89,7 +89,7 @@ const worker = new Worker('notifications', async (job: Job) => {
     `[NotificationWorker] Pushed to ${userId}: ${title} ` +
       `(${response.successCount}/${devices.length} delivered, ${stale.length} stale removed)`,
   );
-}, { connection: redis });
+}, { connection: createWorkerConnection(), ...workerPollingOptions });
 
 worker.on('failed', (job, err) => {
   console.error(`[NotificationWorker] Job ${job?.id} failed:`, err?.message ?? err);
