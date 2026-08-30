@@ -20,7 +20,12 @@ function getMessaging() {
       return null;
     }
     try {
-      const admin = await import('firebase-admin');
+      // `.default`, not the namespace: firebase-admin is CommonJS, and under a
+      // dynamic ESM import every named export comes back undefined. Reading
+      // `admin.apps` off the namespace threw a TypeError that this catch
+      // swallowed, so push silently degraded to "not configured" even with
+      // credentials present.
+      const { default: admin } = await import('firebase-admin');
       if (admin.apps.length === 0) {
         admin.initializeApp({
           credential: process.env.FIREBASE_SERVICE_ACCOUNT
