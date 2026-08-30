@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
 import { friendships, users, groups, groupMembers } from '../../core/db/schema/index.js';
-import { eq, and, or, inArray } from 'drizzle-orm';
+import { eq, and, or, inArray, count } from 'drizzle-orm';
 import { enqueueNotification } from '../../core/queues/notification.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
 import crypto from 'crypto';
@@ -135,11 +135,22 @@ export class SocialService {
     const groupIds = memberships.map(m => m.groupId);
     const userGroups = await db.select().from(groups)
       .where(inArray(groups.id, groupIds));
+
+    // One grouped count rather than a query per group; the client shows this on
+    // every row and rendered "0 members" without it.
+    const counts = await db
+      .select({ groupId: groupMembers.groupId, total: count() })
+      .from(groupMembers)
+      .where(inArray(groupMembers.groupId, groupIds))
+      .groupBy(groupMembers.groupId);
+    const countByGroup = new Map(counts.map(c => [c.groupId, c.total]));
+
     return userGroups.map(g => ({
       id: g.id, name: g.name, owner_id: g.ownerId, is_public: g.isPublic,
       // Only the owner gets the invite token — otherwise any member could hand
       // out permanent invites the owner never authorized.
       invite_token: g.ownerId === userId ? g.inviteToken : null,
+      member_count: countByGroup.get(g.id) ?? 0,
       created_at: g.createdAt.toISOString(),
     }));
   }
@@ -153,6 +164,7 @@ export class SocialService {
     await db.insert(groupMembers).values({ groupId: group.id, userId, role: 'owner' });
     return { id: group.id, name: group.name, owner_id: group.ownerId,
       is_public: group.isPublic, invite_token: group.inviteToken,
+      member_count: 1,
       created_at: group.createdAt.toISOString() };
   }
 
@@ -166,9 +178,15 @@ export class SocialService {
   async getGroupDetail(groupId: string, userId: string) {
     const [group] = await db.select().from(groups).where(eq(groups.id, groupId)).limit(1);
     if (!group) throw new AppError(404, 'Group not found', 'NOT_FOUND');
+    const [members] = await db
+      .select({ total: count() })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupId, groupId));
+
     return { id: group.id, name: group.name, owner_id: group.ownerId,
       is_public: group.isPublic,
       invite_token: group.ownerId === userId ? group.inviteToken : null,
+      member_count: members?.total ?? 0,
       created_at: group.createdAt.toISOString() };
   }
 

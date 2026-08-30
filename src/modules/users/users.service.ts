@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
 import { users, friendships } from '../../core/db/schema/index.js';
-import { eq, and, or, ilike, ne } from 'drizzle-orm';
+import { eq, and, or, ilike, ne, exists, sql } from 'drizzle-orm';
 import { AppError } from '../../core/errors/app-errors.js';
 
 export class UsersService {
@@ -42,6 +42,30 @@ export class UsersService {
     // page through the entire searchable directory.
     const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`);
 
+    // Correlated on users.id, so it is evaluated per candidate row rather than
+    // needing the caller's whole friend list up front.
+    const isFriendOfCaller = exists(
+      db
+        .select({ one: sql`1` })
+        .from(friendships)
+        .where(
+          and(
+            eq(friendships.status, 'accepted'),
+            // Either side may have sent the request.
+            or(
+              and(
+                eq(friendships.requesterId, currentUserId),
+                eq(friendships.addresseeId, users.id),
+              ),
+              and(
+                eq(friendships.addresseeId, currentUserId),
+                eq(friendships.requesterId, users.id),
+              ),
+            ),
+          ),
+        ),
+    );
+
     const results = await db
       .select()
       .from(users)
@@ -52,9 +76,13 @@ export class UsersService {
             ilike(users.username, `%${escaped}%`),
             ilike(users.displayName, `%${escaped}%`),
           ),
-          // Only show users with privacy_searchable = 'everyone'
-          // TODO: Add 'friends' check when friendship lookup is available
-          eq(users.privacySearchable, 'everyone'),
+          // 'friends' used to fall through this filter and behave exactly like
+          // 'none', so anyone who picked "Friends only" became invisible to
+          // their own friends with nothing to indicate it.
+          or(
+            eq(users.privacySearchable, 'everyone'),
+            and(eq(users.privacySearchable, 'friends'), isFriendOfCaller),
+          ),
         ),
       )
       .limit(20);
