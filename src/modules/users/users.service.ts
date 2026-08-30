@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
 import { users, friendships } from '../../core/db/schema/index.js';
-import { eq, and, or, ilike, ne, exists, sql } from 'drizzle-orm';
+import { eq, and, or, ilike, ne, exists, notExists, sql } from 'drizzle-orm';
 import { AppError } from '../../core/errors/app-errors.js';
 
 export class UsersService {
@@ -66,12 +66,39 @@ export class UsersService {
         ),
     );
 
+    // A block hides the pair from each other's search in both directions: the
+    // blocker should not have to keep seeing them, and the blocked party must
+    // not be able to find the blocker to try again under a new request. Only
+    // sendFriendRequest checked for blocks before, so the target still turned
+    // up here and the block was only enforced at the last step.
+    const blockedEitherWay = notExists(
+      db
+        .select({ one: sql`1` })
+        .from(friendships)
+        .where(
+          and(
+            eq(friendships.status, 'blocked'),
+            or(
+              and(
+                eq(friendships.requesterId, currentUserId),
+                eq(friendships.addresseeId, users.id),
+              ),
+              and(
+                eq(friendships.addresseeId, currentUserId),
+                eq(friendships.requesterId, users.id),
+              ),
+            ),
+          ),
+        ),
+    );
+
     const results = await db
       .select()
       .from(users)
       .where(
         and(
           ne(users.id, currentUserId),
+          blockedEitherWay,
           or(
             ilike(users.username, `%${escaped}%`),
             ilike(users.displayName, `%${escaped}%`),
