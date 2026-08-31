@@ -1,6 +1,6 @@
 import { db } from '../../core/db/drizzle.js';
 import { users, refreshTokens, groups, groupMembers, userDevices } from '../../core/db/schema/index.js';
-import { eq, and, ne, desc, lt, or, sql } from 'drizzle-orm';
+import { eq, and, ne, desc, lt, sql } from 'drizzle-orm';
 import { hashPassword, comparePassword } from '../../core/utils/password.js';
 import { signAccessToken, generateRefreshToken, hashToken } from '../../core/utils/token.js';
 import { invalidateAccountCache } from '../../core/middleware/auth.middleware.js';
