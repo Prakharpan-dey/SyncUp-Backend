@@ -51,9 +51,15 @@ export async function groupRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
+  // Removing yourself is leaving the group; removing anyone else is an owner
+  // action. Both are the same URL because the client already calls it for both.
   app.delete('/:id/members/:userId', async (request, reply) => {
     const { id, userId } = groupMemberParamsSchema.parse(request.params);
-    await service.removeMember(id, userId, request.userId);
+    if (userId === request.userId) {
+      await service.leaveGroup(id, request.userId);
+    } else {
+      await service.removeMember(id, userId, request.userId);
+    }
     return reply.status(204).send();
   });
 }

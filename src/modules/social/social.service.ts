@@ -224,9 +224,59 @@ export class SocialService {
     return { invite_token: updated.inviteToken };
   }
 
+  /**
+   * Removes the caller from a group they belong to.
+   *
+   * Nothing called this before — the only DELETE route went to removeMember,
+   * which rejects a non-owner outright and refuses an owner removing
+   * themselves, so leaving a group was impossible for everyone in it while the
+   * app still offered a LEAVE GROUP button.
+   *
+   * When the owner leaves, the group is handed to its longest-tenured
+   * remaining member, matching what account deletion already does. Otherwise
+   * the group would survive with an owner who is not in it: nobody could
+   * invite, and nobody could remove.
+   */
   async leaveGroup(groupId: string, userId: string) {
-    await db.delete(groupMembers)
-      .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId)));
+    const [group] = await db.select().from(groups)
+      .where(eq(groups.id, groupId)).limit(1);
+    // 404 rather than 403 for a non-member: a stranger probing group ids should
+    // not be able to tell an existing group from one that does not exist.
+    if (!group) throw new AppError(404, 'Group not found', 'NOT_FOUND');
+
+    const [membership] = await db.select().from(groupMembers)
+      .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId)))
+      .limit(1);
+    if (!membership) throw new AppError(404, 'Group not found', 'NOT_FOUND');
+
+    await db.transaction(async (tx) => {
+      await tx.delete(groupMembers)
+        .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId)));
+
+      if (group.ownerId !== userId) return;
+
+      const [successor] = await tx
+        .select({ userId: groupMembers.userId })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupId, groupId))
+        .orderBy(groupMembers.joinedAt)
+        .limit(1);
+
+      if (!successor) {
+        await tx.delete(groups).where(eq(groups.id, groupId));
+        return;
+      }
+
+      await tx.update(groups)
+        .set({ ownerId: successor.userId, updatedAt: new Date() })
+        .where(eq(groups.id, groupId));
+      await tx.update(groupMembers)
+        .set({ role: 'owner' })
+        .where(and(
+          eq(groupMembers.groupId, groupId),
+          eq(groupMembers.userId, successor.userId),
+        ));
+    });
   }
 
   async removeMember(groupId: string, memberId: string, callerUserId: string) {
