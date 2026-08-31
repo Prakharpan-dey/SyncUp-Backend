@@ -1,5 +1,8 @@
 import { db } from '../../core/db/drizzle.js';
-import { users, friendships } from '../../core/db/schema/index.js';
+import {
+  users, friendships, tasks, subjects, attendanceSessions,
+  groups, groupMembers, feedItems, notifications, userDevices,
+} from '../../core/db/schema/index.js';
 import { eq, and, or, ne, exists, notExists, sql } from 'drizzle-orm';
 import { AppError } from '../../core/errors/app-errors.js';
 
@@ -195,6 +198,80 @@ export class UsersService {
       notification_settings: safe.notificationSettings,
       created_at: safe.createdAt.toISOString(),
       updated_at: safe.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Everything this account owns, as one JSON document.
+   *
+   * Deliberately scoped to the user's own rows. Their friendships and group
+   * memberships name other people, so those carry ids and the group's name
+   * only — never another user's email, or anything they have not already been
+   * shown in the app.
+   *
+   * Sessions and auth tokens are excluded on purpose: exporting refresh token
+   * hashes and reset tokens would put live credentials in a file people email
+   * to themselves.
+   */
+  async exportData(userId: string) {
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!user) throw new AppError(404, 'User not found', 'NOT_FOUND');
+
+    const [
+      ownTasks, ownSubjects, ownSessions, ownFeed,
+      ownNotifications, ownDevices, ownFriendships, memberships,
+    ] = await Promise.all([
+      db.select().from(tasks).where(eq(tasks.userId, userId)),
+      db.select().from(subjects).where(eq(subjects.userId, userId)),
+      // Sessions hang off a subject, not a user, so they are reached through
+      // the caller's own subjects.
+      db.select({
+        id: attendanceSessions.id,
+        subjectId: attendanceSessions.subjectId,
+        subjectName: subjects.name,
+        sessionDate: attendanceSessions.sessionDate,
+        status: attendanceSessions.status,
+        createdAt: attendanceSessions.createdAt,
+      }).from(attendanceSessions)
+        .innerJoin(subjects, eq(subjects.id, attendanceSessions.subjectId))
+        .where(eq(subjects.userId, userId)),
+      db.select().from(feedItems).where(eq(feedItems.userId, userId)),
+      db.select().from(notifications).where(eq(notifications.userId, userId)),
+      db.select({
+        platform: userDevices.platform,
+        createdAt: userDevices.createdAt,
+        lastSeenAt: userDevices.lastSeenAt,
+      }).from(userDevices).where(eq(userDevices.userId, userId)),
+      db.select().from(friendships).where(
+        or(eq(friendships.requesterId, userId), eq(friendships.addresseeId, userId))),
+      db.select({
+        groupId: groupMembers.groupId,
+        role: groupMembers.role,
+        joinedAt: groupMembers.joinedAt,
+        groupName: groups.name,
+      }).from(groupMembers)
+        .innerJoin(groups, eq(groups.id, groupMembers.groupId))
+        .where(eq(groupMembers.userId, userId)),
+    ]);
+
+    return {
+      exported_at: new Date().toISOString(),
+      profile: this.sanitize(user),
+      tasks: ownTasks,
+      subjects: ownSubjects,
+      attendance_sessions: ownSessions,
+      feed_items: ownFeed,
+      notifications: ownNotifications,
+      // Push tokens themselves are omitted; they identify a handset and are
+      // useless to the user.
+      devices: ownDevices,
+      friendships: ownFriendships.map((f) => ({
+        friend_id: f.requesterId === userId ? f.addresseeId : f.requesterId,
+        direction: f.requesterId === userId ? 'sent' : 'received',
+        status: f.status,
+        created_at: f.createdAt,
+      })),
+      group_memberships: memberships,
     };
   }
 }

@@ -4,6 +4,7 @@ import { eq, and, ne, desc, lt, or, sql } from 'drizzle-orm';
 import { hashPassword, comparePassword } from '../../core/utils/password.js';
 import { signAccessToken, generateRefreshToken, hashToken } from '../../core/utils/token.js';
 import { invalidateAccountCache } from '../../core/middleware/auth.middleware.js';
+import { redis } from '../../core/redis/redis.js';
 import { enqueueEmail } from '../../core/queues/email.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
 import { env } from '../../core/config/env.js';
@@ -24,6 +25,22 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * longer than that to reach the server read as an attack and ended the session.
  */
 const REFRESH_REUSE_GRACE_MS = 60_000;
+
+/**
+ * Account-scoped brute-force lockout.
+ *
+ * The IP+email rate limit on the route stops one address hammering one account,
+ * but the key includes the IP — so N addresses each get their own budget
+ * against the same email, and a distributed attempt is effectively unthrottled.
+ * This counter is keyed on the email alone.
+ *
+ * Counted for unknown addresses too. Only locking accounts that exist would
+ * make the lockout itself an existence oracle: a 429 would mean "real account",
+ * a 401 would mean "no such user".
+ */
+const LOGIN_FAIL_LIMIT = 10;
+const LOGIN_FAIL_WINDOW_SECONDS = 15 * 60;
+const loginFailKey = (email: string) => `login:fail:${email}`;
 
 /**
  * A throwaway hash to compare against when no account matches, so a failed
@@ -78,7 +95,7 @@ export class AuthService {
       .where(eq(users.email, data.email))
       .limit(1);
     if (existingEmail.length > 0) {
-      throw new AppError(409, 'Email already registered', 'CONFLICT');
+      throw new AppError(409, 'Email already registered', 'CONFLICT', 'email');
     }
 
     // Check username uniqueness — case-insensitively, matching the
@@ -89,7 +106,7 @@ export class AuthService {
       .where(sql`lower(${users.username}) = lower(${data.username})`)
       .limit(1);
     if (existingUsername.length > 0) {
-      throw new AppError(409, 'Username already taken', 'CONFLICT');
+      throw new AppError(409, 'Username already taken', 'CONFLICT', 'username');
     }
 
     // Create user
@@ -136,6 +153,8 @@ export class AuthService {
   }
 
   async login(email: string, password: string, deviceLabel?: string) {
+    await this.assertNotLockedOut(email);
+
     const [user] = await db
       .select()
       .from(users)
@@ -150,8 +169,13 @@ export class AuthService {
     const valid = await comparePassword(password, hashToCompare);
 
     if (!user || !user.passwordHash || !valid) {
+      await this.recordLoginFailure(email);
       throw new AppError(401, 'Invalid credentials', 'UNAUTHORIZED');
     }
+
+    // A correct password clears the slate, so a user who mistypes a few times
+    // and then succeeds is not carrying a countdown into their next session.
+    await redis.del(loginFailKey(email)).catch(() => {});
 
     const { accessToken, refreshToken } = await this.generateTokenPair(user.id, {
       deviceLabel: deviceLabel ?? null,
@@ -725,5 +749,39 @@ export class AuthService {
       created_at: safe.createdAt.toISOString(),
       updated_at: safe.updatedAt.toISOString(),
     };
+  }
+
+  /**
+   * Rejects further attempts once an address has failed too many times.
+   *
+   * Redis failures are swallowed: an outage should degrade to "no lockout"
+   * rather than locking everyone out of their accounts.
+   */
+  private async assertNotLockedOut(email: string) {
+    let failures = 0;
+    try {
+      failures = Number(await redis.get(loginFailKey(email))) || 0;
+    } catch {
+      return;
+    }
+
+    if (failures >= LOGIN_FAIL_LIMIT) {
+      throw new AppError(
+        429,
+        'Too many failed sign-in attempts. Try again later.',
+        'TOO_MANY_ATTEMPTS',
+      );
+    }
+  }
+
+  /** Counts a failure against the address, on a sliding window from the first. */
+  private async recordLoginFailure(email: string) {
+    try {
+      const key = loginFailKey(email);
+      const count = await redis.incr(key);
+      if (count === 1) await redis.expire(key, LOGIN_FAIL_WINDOW_SECONDS);
+    } catch {
+      // Not worth failing the request over.
+    }
   }
 }

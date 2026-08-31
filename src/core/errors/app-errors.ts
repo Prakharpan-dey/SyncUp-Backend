@@ -3,6 +3,14 @@ export class AppError extends Error {
     public statusCode: number,
     message: string,
     public code?: string,
+    /**
+     * Which submitted field caused this, when exactly one did.
+     *
+     * Lets a client attach the message to the offending input instead of
+     * dropping every failure into one banner under a multi-field form, where
+     * the user is told something is wrong but not what to change.
+     */
+    public field?: string,
   ) {
     super(message);
     this.name = 'AppError';

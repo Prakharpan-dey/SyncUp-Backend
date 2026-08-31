@@ -35,11 +35,43 @@ const passwordField = z
  */
 const deviceLabelField = z.string().trim().min(1).max(120).optional();
 
+/**
+ * Handles nobody may claim.
+ *
+ * Two reasons. Names like `admin` and `support` let an account pose as the
+ * service itself, which matters more now that user search is an exact-username
+ * lookup: whoever holds `support` is precisely who someone finds when they go
+ * looking for it. The rest are path-like words kept clear so a future
+ * `/settings` or `/api` route cannot collide with a profile handle.
+ *
+ * Compared case-insensitively, matching the lower(username) unique index.
+ */
+const RESERVED_USERNAMES = new Set([
+  'admin', 'administrator', 'root', 'superuser', 'sysadmin',
+  'support', 'help', 'helpdesk', 'contact', 'info', 'abuse', 'security',
+  'syncup', 'team', 'staff', 'official', 'moderator', 'mod',
+  'api', 'app', 'www', 'mail', 'ftp', 'auth', 'login', 'signup', 'register',
+  'me', 'you', 'self', 'user', 'users', 'account', 'accounts', 'profile',
+  'settings', 'about', 'terms', 'privacy', 'legal', 'null', 'undefined',
+  'everyone', 'all', 'none', 'anonymous', 'guest', 'system', 'bot',
+]);
+
+const usernameField = z
+  .string()
+  .trim()
+  .min(3)
+  .max(40)
+  .regex(/^[a-zA-Z0-9_]+$/,
+    'Username can only contain letters, numbers, and underscores')
+  .refine(
+    (value) => !RESERVED_USERNAMES.has(value.toLowerCase()),
+    'That username is reserved',
+  );
+
 export const signUpSchema = z.object({
   email: emailField,
   password: passwordField,
-  username: z.string().trim().min(3).max(40).regex(/^[a-zA-Z0-9_]+$/,
-    'Username can only contain letters, numbers, and underscores'),
+  username: usernameField,
   display_name: z.string().trim().min(1).max(80),
   device_label: deviceLabelField,
 });

@@ -12,6 +12,7 @@ export function errorHandler(
     return reply.status(error.statusCode).send({
       message: error.message,
       code: error.code,
+      ...(error.field ? { field: error.field } : {}),
     });
   }
 

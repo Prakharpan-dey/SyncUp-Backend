@@ -22,6 +22,17 @@ export async function userRoutes(app: FastifyInstance) {
     return reply.send(user);
   });
 
+  // GET /users/me/export — everything this account owns, as JSON.
+  app.get('/me/export', {
+    // A full-account dump is expensive and nobody needs it repeatedly.
+    config: { rateLimit: { max: 3, timeWindow: '15 minutes' } },
+  }, async (request, reply) => {
+    const data = await service.exportData(request.userId);
+    return reply
+      .header('content-disposition', 'attachment; filename="syncup-export.json"')
+      .send(data);
+  });
+
   // GET /users/search?q=
   app.get('/search', async (request, reply) => {
     const { q } = searchUsersSchema.parse(request.query);
