@@ -1,8 +1,10 @@
 import { db } from '../../core/db/drizzle.js';
-import { feedItems, friendships, groupMembers, users } from '../../core/db/schema/index.js';
+import { feedItems, friendships, groupMembers, groups, users } from '../../core/db/schema/index.js';
 import { eq, and, or, lt, desc, inArray, sql } from 'drizzle-orm';
 import { enqueueNotification } from '../../core/queues/notification.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
+
+type Reaction = { user_id: string; emoji: string; created_at: string };
 
 export class FeedService {
   /** User IDs whose 'friends'-visibility items this user may see (accepted friends + self). */
@@ -72,6 +74,17 @@ export class FeedService {
     const pageItems = hasMore ? items.slice(0, limit) : items;
     const nextCursor = hasMore ? pageItems[pageItems.length - 1].createdAt.toISOString() : null;
 
+    // Group items carry only a group_id, which says nothing to a reader who is
+    // in several groups. One lookup for the page rather than per item.
+    const groupIds = [...new Set(pageItems.flatMap(i => i.groupId ? [i.groupId] : []))];
+    const groupNames = groupIds.length === 0
+      ? new Map<string, string>()
+      : new Map(
+        (await db.select({ id: groups.id, name: groups.name })
+          .from(groups).where(inArray(groups.id, groupIds)))
+          .map(g => [g.id, g.name] as const),
+      );
+
     return {
       items: pageItems.map(item => ({
         id: item.id,
@@ -84,41 +97,67 @@ export class FeedService {
         metadata: item.metadata,
         visibility: item.visibility,
         group_id: item.groupId,
+        group_name: item.groupId ? groupNames.get(item.groupId) ?? null : null,
         reaction_count: item.reactionCount,
-        comment_count: item.commentCount,
+        // Whether this viewer has already reacted, so the client can render the
+        // toggled state instead of guessing.
+        reacted: ((item.reactions ?? []) as Reaction[]).some(r => r.user_id === userId),
         created_at: item.createdAt.toISOString(),
       })),
       next_cursor: nextCursor,
     };
   }
 
+  /**
+   * Applies one reaction per user, toggling.
+   *
+   * Reacting used to append unconditionally, so a single user tapping five
+   * times drove reaction_count to 5 — the number measured taps, not people.
+   * Tapping the same emoji again now removes it, and a different emoji
+   * replaces the previous one.
+   *
+   * The row is locked for the read-modify-write because the count is derived
+   * from the array; two concurrent reactions would otherwise both write a
+   * count computed from the same stale copy.
+   */
   async react(feedItemId: string, userId: string, emoji: string) {
     await this.assertCanAccessItem(feedItemId, userId);
 
-    const reaction = JSON.stringify([{ user_id: userId, emoji, created_at: new Date().toISOString() }]);
-    const result = await db.update(feedItems).set({
-      reactions: sql`coalesce(${feedItems.reactions}, '[]'::jsonb) || ${reaction}::jsonb`,
-      reactionCount: sql`${feedItems.reactionCount} + 1`,
-    }).where(eq(feedItems.id, feedItemId)).returning({ id: feedItems.id });
+    return db.transaction(async (tx) => {
+      const [item] = await tx
+        .select({ reactions: feedItems.reactions })
+        .from(feedItems)
+        .where(eq(feedItems.id, feedItemId))
+        .for('update')
+        .limit(1);
 
-    if (result.length === 0) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
+      if (!item) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
 
-    void this.notifyOwner(feedItemId, userId, 'reaction', `reacted ${emoji} to your post`);
+      const existing = (item.reactions ?? []) as Reaction[];
+      const mine = existing.find((r) => r.user_id === userId);
+      const others = existing.filter((r) => r.user_id !== userId);
+
+      // Same emoji again means "undo"; anything else replaces.
+      const removing = mine?.emoji === emoji;
+      const next = removing
+        ? others
+        : [...others, { user_id: userId, emoji, created_at: new Date().toISOString() }];
+
+      await tx
+        .update(feedItems)
+        .set({ reactions: next, reactionCount: next.length })
+        .where(eq(feedItems.id, feedItemId));
+
+      // Only a new reaction is worth a notification — not an undo, and not
+      // swapping one emoji for another on a post already reacted to.
+      if (!removing && !mine) {
+        void this.notifyOwner(feedItemId, userId, 'reaction', `reacted ${emoji} to your post`);
+      }
+
+      return { reacted: !removing, reaction_count: next.length };
+    });
   }
 
-  async comment(feedItemId: string, userId: string, text: string) {
-    await this.assertCanAccessItem(feedItemId, userId);
-
-    const comment = JSON.stringify([{ user_id: userId, text, created_at: new Date().toISOString() }]);
-    const result = await db.update(feedItems).set({
-      comments: sql`coalesce(${feedItems.comments}, '[]'::jsonb) || ${comment}::jsonb`,
-      commentCount: sql`${feedItems.commentCount} + 1`,
-    }).where(eq(feedItems.id, feedItemId)).returning({ id: feedItems.id });
-
-    if (result.length === 0) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
-
-    void this.notifyOwner(feedItemId, userId, 'comment', 'commented on your post');
-  }
 
   /**
    * Tells the item's owner someone interacted with it.

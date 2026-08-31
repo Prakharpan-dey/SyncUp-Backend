@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { authGuard, requireVerifiedEmail } from '../../core/middleware/auth.middleware.js';
 import { idParamSchema } from '../../core/validation/params.js';
 import { FeedService } from './feed.service.js';
-import { feedQuerySchema, reactSchema, commentSchema } from './feed.schema.js';
+import { feedQuerySchema, reactSchema } from './feed.schema.js';
 
 const service = new FeedService();
 
@@ -16,17 +16,12 @@ export async function feedRoutes(app: FastifyInstance) {
     return reply.send(result);
   });
 
+  // Returns the toggled state and the new count, so the client renders what
+  // the server actually recorded rather than incrementing blindly.
   app.post('/:id/react', async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);
     const { emoji } = reactSchema.parse(request.body);
-    await service.react(id, request.userId, emoji);
-    return reply.status(204).send();
-  });
-
-  app.post('/:id/comment', async (request, reply) => {
-    const { id } = idParamSchema.parse(request.params);
-    const { text } = commentSchema.parse(request.body);
-    await service.comment(id, request.userId, text);
-    return reply.status(204).send();
+    const result = await service.react(id, request.userId, emoji);
+    return reply.send(result);
   });
 }
