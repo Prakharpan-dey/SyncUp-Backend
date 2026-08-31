@@ -8,6 +8,7 @@ import { redis } from './core/redis/redis.js';
 import { errorHandler } from './core/middleware/error-handler.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { accountRoutes } from './modules/account/account.routes.js';
+import { legalRoutes } from './modules/legal/legal.routes.js';
 import { userRoutes } from './modules/users/users.routes.js';
 import { taskRoutes } from './modules/tasks/tasks.routes.js';
 import { attendanceRoutes } from './modules/attendance/attendance.routes.js';
@@ -66,6 +67,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Public, no session required — Play Store needs a deletion URL that works
   // without installing the app.
   await app.register(accountRoutes, { prefix: '/account' });
+  await app.register(legalRoutes, { prefix: '/legal' });
   await app.register(userRoutes, { prefix: '/users' });
   await app.register(taskRoutes, { prefix: '/tasks' });
   await app.register(attendanceRoutes, { prefix: '/subjects' });

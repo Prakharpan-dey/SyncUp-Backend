@@ -13,19 +13,19 @@
  * instantly under a `default-src 'none'` policy.
  */
 
-const INK = '#111111';
-const PAPER = '#EDEDED';
-const PURPLE = '#6C5CE7';
+export const INK = '#111111';
+export const PAPER = '#EDEDED';
+export const PURPLE = '#6C5CE7';
 const TEAL = '#00CEC9';
 const GREEN = '#00B894';
 const RED = '#FF6B6B';
 
-const BODY_FONT =
+export const BODY_FONT =
   "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
-const MONO_FONT =
+export const MONO_FONT =
   "ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
