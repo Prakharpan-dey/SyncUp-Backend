@@ -1,0 +1,10 @@
+{
+  "message": "Validation error",
+  "code": "VALIDATION_ERROR",
+  "errors": {
+    "email": ["Invalid email"],
+    "password": ["Password must be at least 8 characters"],
+    "username": ["Too small: expected string to have >=3 characters"],
+    "display_name": ["Too small: expected string to have >=1 characters"]
+  }
+}

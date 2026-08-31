@@ -1,0 +1,9 @@
+{
+  "id": "dddddddd-4444-4444-8444-444444444444",
+  "name": "DBMS Study Group",
+  "owner_id": "bbbbbbbb-2222-4222-8222-222222222222",
+  "is_public": false,
+  "invite_token": null,
+  "member_count": 3,
+  "created_at": "2026-08-31T06:30:00.000Z"
+}

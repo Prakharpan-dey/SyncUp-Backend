@@ -1,0 +1,1 @@
+{ "message": "Username already taken", "code": "CONFLICT", "field": "username" }
