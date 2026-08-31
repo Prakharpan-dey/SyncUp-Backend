@@ -18,9 +18,12 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
  *
  * Two parallel refreshes from the same client, or a request retried after the
  * device came back online, will present a token revoked seconds ago. Without a
- * window that trips reuse detection and signs the user out everywhere.
+ * window that trips reuse detection and signs the user out.
+ *
+ * 15s was too tight for a phone on a weak connection: a queued retry that took
+ * longer than that to reach the server read as an attack and ended the session.
  */
-const REFRESH_REUSE_GRACE_MS = 15_000;
+const REFRESH_REUSE_GRACE_MS = 60_000;
 
 /**
  * A throwaway hash to compare against when no account matches, so a failed
@@ -189,13 +192,17 @@ export class AuthService {
         : Number.POSITIVE_INFINITY;
 
       if (revokedMsAgo > REFRESH_REUSE_GRACE_MS) {
+        // Scoped to the offending session, not the whole account. A stolen or
+        // stale token compromises one device; revoking every session punished
+        // the user's other devices for it, and a single client-side race was
+        // enough to sign them out everywhere at once.
         await db
           .update(refreshTokens)
           .set({ isRevoked: true, revokedAt: new Date() })
-          .where(eq(refreshTokens.userId, stored.userId));
+          .where(eq(refreshTokens.sessionId, stored.sessionId));
         throw new AppError(
           401,
-          'Refresh token reuse detected. All sessions revoked.',
+          'Refresh token reuse detected. This session has been revoked.',
           'TOKEN_REUSE',
         );
       }
