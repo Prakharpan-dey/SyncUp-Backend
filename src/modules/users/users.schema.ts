@@ -9,7 +9,11 @@ export const updateProfileSchema = z.object({
   semester: z.number().int().min(1).max(12).nullable().optional(),
   graduation_year: z.number().int().min(2020).max(2040).nullable().optional(),
   privacy_searchable: z.enum(['everyone', 'friends', 'none']).optional(),
-  privacy_sharing_default: z.enum(['none', 'summary', 'selected', 'all']).optional(),
+  // 'selected' is deliberately not accepted. The database enum still carries
+  // it (Postgres cannot drop an enum value cleanly) but there is no per-task
+  // sharing model behind it, so it behaved identically to 'all' while implying
+  // granularity that does not exist.
+  privacy_sharing_default: z.enum(['none', 'summary', 'all']).optional(),
   notification_settings: z.record(z.string(), z.boolean()).optional(),
   // fcm_token deliberately absent: push tokens are registered via
   // POST /auth/devices, which takes ownership of the token. Accepting one here
