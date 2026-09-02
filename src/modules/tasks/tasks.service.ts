@@ -22,10 +22,13 @@ export class TasksService {
   }
 
   async createTask(userId: string, data: {
+    id?: string;
     title: string; description?: string; due_date?: string;
     priority?: string; tags?: string[]; sharing_override?: string;
   }) {
     const [task] = await db.insert(tasks).values({
+      // Absent leaves the column default, which generates one.
+      ...(data.id ? { id: data.id } : {}),
       userId,
       title: data.title,
       description: data.description,
@@ -33,9 +36,22 @@ export class TasksService {
       priority: (data.priority as 'high' | 'medium' | 'low') ?? 'medium',
       tags: data.tags,
       sharingOverride: data.sharing_override as any,
-    }).returning();
+    })
+      // The offline outbox retries a create whose response was lost, so the
+      // same id arrives twice. Doing nothing on conflict makes that a no-op
+      // instead of a primary key violation.
+      .onConflictDoNothing()
+      .returning();
 
-    return this.serialize(task);
+    if (task) return this.serialize(task);
+
+    // Nothing inserted: the id already exists. Return the caller's own row so
+    // the retry is idempotent — and refuse if the id belongs to someone else,
+    // rather than disclosing that it is taken.
+    const [existing] = await db.select().from(tasks)
+      .where(and(eq(tasks.id, data.id!), eq(tasks.userId, userId))).limit(1);
+    if (!existing) throw new AppError(409, 'Task id already in use', 'CONFLICT');
+    return this.serialize(existing);
   }
 
   async getTask(taskId: string, userId: string) {

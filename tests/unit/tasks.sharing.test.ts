@@ -130,3 +130,46 @@ describe('completion publishing in general', () => {
     expect(result).toMatchObject({ id: 't1' });
   });
 });
+
+describe('the client owns the task id', () => {
+  /**
+   * Tasks are created offline and referenced by their client id straight away.
+   * A server-assigned id left the device holding one the server had never seen,
+   * so every later toggle, edit and delete answered 404 — completions never
+   * reached the feed at all.
+   */
+  it('inserts the id the client supplied', async () => {
+    dbMock.queueRows([{ id: 'client-uuid', userId: 'u1', title: TITLE, status: 'pending', ...STAMPS }]);
+    await tasksService.createTask('u1', { id: 'client-uuid', title: TITLE });
+
+    const values = dbMock.trace.find((c) => c.method === 'values');
+    expect((values?.args[0] as Record<string, unknown>).id).toBe('client-uuid');
+  });
+
+  it('leaves the id to the database when none is given', async () => {
+    dbMock.queueRows([{ id: 'server-uuid', userId: 'u1', title: TITLE, status: 'pending', ...STAMPS }]);
+    await tasksService.createTask('u1', { title: TITLE });
+
+    const values = dbMock.trace.find((c) => c.method === 'values');
+    expect((values?.args[0] as Record<string, unknown>)).not.toHaveProperty('id');
+  });
+
+  // The outbox retries a create whose response was lost.
+  it('is idempotent when the same id arrives twice', async () => {
+    dbMock.queueMany(
+      [],                                                   // insert conflicts
+      [{ id: 'client-uuid', userId: 'u1', title: TITLE, status: 'pending', ...STAMPS }],
+    );
+    const again = await tasksService.createTask('u1', { id: 'client-uuid', title: TITLE });
+
+    expect(again).toMatchObject({ id: 'client-uuid' });
+    expect(dbMock.called('onConflictDoNothing')).toBe(true);
+  });
+
+  it('refuses an id that belongs to someone else', async () => {
+    dbMock.queueMany([], []); // insert conflicts, and the row is not the caller's
+    await expect(
+      tasksService.createTask('u1', { id: 'someone-elses', title: TITLE }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+});

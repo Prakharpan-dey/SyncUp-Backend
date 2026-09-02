@@ -2,6 +2,12 @@ import { z } from 'zod';
 import { isoDateSchema } from '../../core/validation/params.js';
 
 export const createTaskSchema = z.object({
+  // The client owns the id. Tasks are created offline and referenced by that
+  // id immediately — by the toggle, the edit and the delete — so a
+  // server-assigned id would leave the device holding one the server has never
+  // seen, and every later write would 404. Optional: callers that do not
+  // supply one still get a generated id.
+  id: z.string().uuid().optional(),
   title: z.string().min(1).max(255),
   description: z.string().optional(),
   due_date: isoDateSchema.optional(),
