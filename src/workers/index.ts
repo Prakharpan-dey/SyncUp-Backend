@@ -15,6 +15,7 @@ import emailWorker from './email.worker.js';
 import feedWorker from './feed.worker.js';
 import notificationWorker from './notification.worker.js';
 import { startCleanupSchedule, stopCleanupSchedule } from './cleanup.worker.js';
+import { startReminderSchedule, stopReminderSchedule } from './reminder.worker.js';
 
 const workers = [
   { name: 'email', worker: emailWorker },
@@ -22,12 +23,13 @@ const workers = [
   { name: 'notifications', worker: notificationWorker },
 ];
 
-// A plain timer, not a queue — see cleanup.worker.ts for why.
+// Plain timers, not queues — see cleanup.worker.ts for why.
 startCleanupSchedule();
+startReminderSchedule();
 
 console.log(
-  `[Workers] Started: ${workers.map((w) => w.name).join(', ')}, cleanup (timer) ` +
-    `[${env.NODE_ENV}]`,
+  `[Workers] Started: ${workers.map((w) => w.name).join(', ')}, ` +
+    `cleanup + reminders (timers) [${env.NODE_ENV}]`,
 );
 
 if (!env.SMTP_HOST) {
@@ -47,6 +49,7 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT && !process.env.GOOGLE_APPLICATION_CRE
 async function shutdown(signal: string) {
   console.log(`[Workers] Received ${signal}, closing...`);
   stopCleanupSchedule();
+  stopReminderSchedule();
   // Let in-flight jobs finish so a deploy doesn't drop a half-sent email.
   // Each worker owns its connection, so close() releases it.
   await Promise.allSettled(workers.map(({ worker }) => worker.close()));

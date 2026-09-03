@@ -110,11 +110,18 @@ describe('the preference lookup itself', () => {
     ['friend_request', 'friend_requests'],
     ['reaction', 'reactions'],
     ['comment', 'comments'],
-    ['daily_digest', 'daily_digest'],
   ])('%s is muted by %s', async (type, key) => {
     dbMock.queueRows([{ settings: { [key]: false } }]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(await pushAllowed('u1', type as any)).toBe(false);
+  });
+
+  // Retired: the digest had no producer and no scheduler, so the switch
+  // promised a daily summary that was never sent. It carries no preference key
+  // now, which means nothing can mute it — and nothing creates one either.
+  it('does not treat the retired daily digest as mutable', async () => {
+    dbMock.queueRows([{ settings: { daily_digest: false } }]);
+    expect(await pushAllowed('u1', 'daily_digest')).toBe(true);
   });
 
   it('allows the category when the row is missing entirely', async () => {

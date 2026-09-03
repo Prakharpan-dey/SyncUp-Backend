@@ -18,20 +18,35 @@ export interface NotificationJobData {
 }
 
 /**
+ * Types that carry no preference and are therefore never muted here.
+ *
+ * `daily_digest` is retired: it was an enum value and a switch in the app with
+ * no producer and no scheduler behind it, so it promised a daily summary the
+ * app never sent. The enum value itself stays in Postgres — dropping one is a
+ * destructive migration — but nothing creates or mutes it any more.
+ */
+type UnmanagedType = 'daily_digest';
+
+/**
  * notification_type → the key used in `users.notification_settings`.
  *
  * The enum is singular and the preference keys are plural, so the mapping is
  * explicit rather than derived — a silent mismatch would quietly mute or
- * unmute a whole category.
+ * unmute a whole category. Typed exhaustively over every managed type, so
+ * adding a notification type without a preference key fails the build.
  */
-const PREFERENCE_KEY: Record<NotificationType, string> = {
+const PREFERENCE_KEY: Record<Exclude<NotificationType, UnmanagedType>, string> = {
   task_reminder: 'task_reminders',
   attendance_warning: 'attendance_warnings',
   friend_request: 'friend_requests',
   reaction: 'reactions',
   comment: 'comments',
-  daily_digest: 'daily_digest',
 };
+
+/** The preference key for a type, or undefined when the type carries none. */
+function preferenceKeyFor(type: NotificationType): string | undefined {
+  return (PREFERENCE_KEY as Record<string, string | undefined>)[type];
+}
 
 /**
  * Whether this category may be pushed to [userId].
@@ -48,7 +63,7 @@ export async function pushAllowed(
   userId: string,
   type: NotificationType,
 ): Promise<boolean> {
-  const key = PREFERENCE_KEY[type];
+  const key = preferenceKeyFor(type);
   if (key === undefined) return true;
 
   const [recipient] = await db
@@ -85,7 +100,7 @@ export async function handleNotificationJob(data: NotificationJobData) {
   if (!(await pushAllowed(userId, type))) {
     console.log(
       `[NotificationWorker] Stored for ${userId}: ${title} ` +
-        `(push muted by preference: ${PREFERENCE_KEY[type]})`,
+        `(push muted by preference: ${preferenceKeyFor(type)})`,
     );
     return;
   }
