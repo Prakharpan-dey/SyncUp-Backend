@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 
 import { db } from '../core/db/drizzle.js';
 import { enqueueNotification } from '../core/queues/notification.queue.js';
@@ -39,6 +39,25 @@ function isoDay(offsetDays = 0): string {
 }
 
 /**
+ * Whether the *server* should remind about this task.
+ *
+ * The device schedules an exact local notification for anything carrying a due
+ * time, in the user's own timezone. The server has no timezone at all, so its
+ * UTC-day sweep would fire up to a day off and could not know the device had
+ * already notified. It therefore covers only what the device does not: one-off,
+ * date-only tasks.
+ *
+ * Expressed as a plain function as well as SQL because Drizzle `where`
+ * predicates are circular objects that cannot be asserted in tests — this is
+ * what makes the policy checkable.
+ */
+export function serverShouldRemind(
+  task: { seriesId: string | null; dueTime: string | null },
+): boolean {
+  return task.seriesId === null && task.dueTime === null;
+}
+
+/**
  * Reminds about pending tasks due today or tomorrow.
  *
  * Overdue tasks are deliberately excluded: the reminder is "this is coming up",
@@ -56,12 +75,21 @@ function isoDay(offsetDays = 0): string {
  */
 export async function sendTaskReminders(): Promise<number> {
   const due = await db
-    .select({ id: tasks.id, userId: tasks.userId, title: tasks.title, dueDate: tasks.dueDate })
+    .select({
+      id: tasks.id, userId: tasks.userId, title: tasks.title, dueDate: tasks.dueDate,
+      seriesId: tasks.seriesId, dueTime: tasks.dueTime,
+    })
     .from(tasks)
     .where(and(
       eq(tasks.status, 'pending'),
       inArray(tasks.dueDate, [isoDay(0), isoDay(1)]),
-    ));
+      // Filtered in SQL so the sweep does not haul back every occurrence of
+      // every habit, and again in JS so the policy is testable. See
+      // `serverShouldRemind`.
+      isNull(tasks.seriesId),
+      isNull(tasks.dueTime),
+    ))
+    .then((rows) => rows.filter(serverShouldRemind));
 
   if (due.length === 0) return 0;
 

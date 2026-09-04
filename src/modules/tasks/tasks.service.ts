@@ -25,6 +25,7 @@ export class TasksService {
     id?: string;
     title: string; description?: string; due_date?: string;
     priority?: string; tags?: string[]; sharing_override?: string;
+    due_time?: string; series_id?: string;
   }) {
     const [task] = await db.insert(tasks).values({
       // Absent leaves the column default, which generates one.
@@ -36,6 +37,8 @@ export class TasksService {
       priority: (data.priority as 'high' | 'medium' | 'low') ?? 'medium',
       tags: data.tags,
       sharingOverride: data.sharing_override as any,
+      dueTime: data.due_time,
+      seriesId: data.series_id,
     })
       // The offline outbox retries a create whose response was lost, so the
       // same id arrives twice. Doing nothing on conflict makes that a no-op
@@ -69,6 +72,8 @@ export class TasksService {
     if (data.priority) updateData.priority = data.priority;
     if (data.tags) updateData.tags = data.tags;
     if (data.sharing_override !== undefined) updateData.sharingOverride = data.sharing_override;
+    if (data.due_time !== undefined) updateData.dueTime = data.due_time;
+    if (data.series_id !== undefined) updateData.seriesId = data.series_id;
 
     const [updated] = await db.update(tasks).set(updateData)
       .where(and(eq(tasks.id, taskId), eq(tasks.userId, userId))).returning();
@@ -160,6 +165,8 @@ export class TasksService {
       status: task.status,
       tags: task.tags ?? [],
       sharing_override: task.sharingOverride,
+      series_id: task.seriesId,
+      due_time: task.dueTime,
       completed_at: task.completedAt?.toISOString() ?? null,
       created_at: task.createdAt.toISOString(),
       updated_at: task.updatedAt.toISOString(),

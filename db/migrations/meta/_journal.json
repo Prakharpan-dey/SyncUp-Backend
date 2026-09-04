@@ -15,6 +15,13 @@
       "when": 1787750958609,
       "tag": "0001_mixed_madrox",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788497612514,
+      "tag": "0002_nappy_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }

@@ -11,6 +11,7 @@ import { accountRoutes } from './modules/account/account.routes.js';
 import { legalRoutes } from './modules/legal/legal.routes.js';
 import { userRoutes } from './modules/users/users.routes.js';
 import { taskRoutes } from './modules/tasks/tasks.routes.js';
+import { taskSeriesRoutes } from './modules/task-series/task-series.routes.js';
 import { attendanceRoutes } from './modules/attendance/attendance.routes.js';
 import { socialRoutes } from './modules/social/social.routes.js';
 import { groupRoutes } from './modules/social/group.routes.js';
@@ -70,6 +71,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(legalRoutes, { prefix: '/legal' });
   await app.register(userRoutes, { prefix: '/users' });
   await app.register(taskRoutes, { prefix: '/tasks' });
+  await app.register(taskSeriesRoutes, { prefix: '/task-series' });
   await app.register(attendanceRoutes, { prefix: '/subjects' });
   await app.register(socialRoutes, { prefix: '/friends' });
   await app.register(groupRoutes, { prefix: '/groups' });

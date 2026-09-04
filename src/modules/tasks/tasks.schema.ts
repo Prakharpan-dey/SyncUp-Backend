@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateSchema } from '../../core/validation/params.js';
+import { isoDateSchema, isoTimeSchema } from '../../core/validation/params.js';
 
 export const createTaskSchema = z.object({
   // The client owns the id. Tasks are created offline and referenced by that
@@ -14,6 +14,8 @@ export const createTaskSchema = z.object({
   priority: z.enum(['high', 'medium', 'low']).default('medium'),
   tags: z.array(z.string()).optional(),
   sharing_override: z.enum(['inherit', 'none', 'summary', 'selected', 'all']).optional(),
+  due_time: isoTimeSchema.optional(),
+  series_id: z.string().uuid().optional(),
 });
 
 export const updateTaskSchema = createTaskSchema.partial().refine(

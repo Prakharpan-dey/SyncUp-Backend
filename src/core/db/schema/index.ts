@@ -3,6 +3,7 @@ export * from './refresh-tokens.js';
 export * from './auth-tokens.js';
 export * from './user-devices.js';
 export * from './tasks.js';
+export * from './task-series.js';
 export * from './subjects.js';
 export * from './attendance-sessions.js';
 export * from './friendships.js';
