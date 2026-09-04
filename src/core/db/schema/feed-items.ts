@@ -1,7 +1,12 @@
 import { pgTable, uuid, varchar, text, integer, timestamp, pgEnum, jsonb, index } from 'drizzle-orm/pg-core';
 import { users } from './users.js';
 
-export const feedItemTypeEnum = pgEnum('feed_item_type', ['task_completed', 'streak_milestone', 'attendance_milestone']);
+// 'daily_plan' is a snapshot of what someone had on for a day, posted
+// deliberately. The other three are events the app emits on the user's behalf —
+// and of those, only 'task_completed' currently has a producer.
+export const feedItemTypeEnum = pgEnum('feed_item_type', [
+  'task_completed', 'streak_milestone', 'attendance_milestone', 'daily_plan',
+]);
 export const feedVisibilityEnum = pgEnum('feed_visibility', ['friends', 'group']);
 
 export const feedItems = pgTable('feed_items', {

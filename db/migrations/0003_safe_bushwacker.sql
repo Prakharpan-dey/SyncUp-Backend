@@ -1,0 +1,1 @@
+ALTER TYPE "public"."feed_item_type" ADD VALUE 'daily_plan';

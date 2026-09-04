@@ -6,6 +6,29 @@ import { AppError } from '../../core/errors/app-errors.js';
 
 type Reaction = { user_id: string; emoji: string; created_at: string };
 
+/** How many plan lines travel in a feed card. */
+const PLAN_ITEM_LIMIT = 10;
+
+const PLAN_TITLE = "Shared today's plan";
+
+/** Module-level so it can never depend on `this` if used as a callback. */
+function serializePlan(row: typeof feedItems.$inferSelect) {
+  return {
+    id: row.id,
+    actor_id: row.userId,
+    actor_name: row.actorName,
+    type: row.type,
+    title: row.title,
+    summary: row.summary,
+    metadata: row.metadata,
+    visibility: row.visibility,
+    group_id: row.groupId,
+    reaction_count: row.reactionCount,
+    reacted: false,
+    created_at: row.createdAt.toISOString(),
+  };
+}
+
 export class FeedService {
   /** User IDs whose 'friends'-visibility items this user may see (accepted friends + self). */
   private async visibleFriendIds(userId: string) {
@@ -192,5 +215,91 @@ export class FeedService {
     } catch (err) {
       console.error('[Feed] Failed to enqueue interaction notification:', err);
     }
+  }
+  /**
+   * Posts a snapshot of one day's tasks to the author's friends.
+   *
+   * Written straight to the table rather than through `enqueueFeedItem`, for two
+   * reasons. The feed worker fans out one extra row per group the author belongs
+   * to, unconditionally and with no way for a producer to opt out — routing a
+   * plan through it would publish the user's whole day to every group they are
+   * in. And this is an explicit action rather than a side effect, so it should
+   * be synchronous and able to report back that it worked.
+   *
+   * Re-sharing the same day updates the existing card instead of posting a
+   * second one, so a feed does not fill with one person refreshing their plan.
+   */
+  async shareDailyPlan(
+    userId: string,
+    data: { date: string; items: { title: string; done: boolean }[] },
+  ) {
+    const [user] = await db
+      .select({
+        displayName: users.displayName,
+        sharing: users.privacySharingDefault,
+      })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+
+    if (!user) throw new AppError(404, 'User not found', 'NOT_FOUND');
+
+    // Someone who chose to share nothing should not be able to publish their
+    // whole day, even deliberately. 'summary' is not filtered here: sharing a
+    // plan is an explicit, previewed action and the user is looking at the exact
+    // titles as they confirm.
+    if (user.sharing === 'none') {
+      throw new AppError(403, 'Sharing is turned off in your privacy settings', 'SHARING_DISABLED');
+    }
+
+    const total = data.items.length;
+    const done = data.items.filter((i) => i.done).length;
+    // Capped so one person's forty-task day cannot dominate a friend's feed or
+    // bloat the jsonb column.
+    const shown = data.items.slice(0, PLAN_ITEM_LIMIT);
+
+    const metadata = {
+      date: data.date,
+      total,
+      done,
+      items: shown,
+      truncated: total > shown.length,
+    };
+    const summary = `${done} of ${total} done`;
+
+    const [existing] = await db
+      .select({ id: feedItems.id })
+      .from(feedItems)
+      .where(and(
+        eq(feedItems.userId, userId),
+        eq(feedItems.type, 'daily_plan'),
+        sql`${feedItems.metadata}->>'date' = ${data.date}`,
+      ))
+      .limit(1);
+
+    if (existing) {
+      const [updated] = await db
+        .update(feedItems)
+        .set({ actorName: user.displayName, summary, metadata })
+        .where(eq(feedItems.id, existing.id))
+        .returning();
+      return serializePlan(updated);
+    }
+
+    const [created] = await db
+      .insert(feedItems)
+      .values({
+        userId,
+        actorName: user.displayName,
+        type: 'daily_plan',
+        title: PLAN_TITLE,
+        summary,
+        metadata,
+        // Friends only, deliberately. Groups are not an audience for this.
+        visibility: 'friends',
+        groupId: null,
+      })
+      .returning();
+    return serializePlan(created);
   }
 }
