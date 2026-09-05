@@ -111,4 +111,26 @@ describe('changing a series', () => {
     dbMock.queueRows([]);
     await expect(service.deleteSeries('s1', 'u2')).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  /**
+   * `tasks.series_id` has no foreign key, so nothing cleaned up after a delete
+   * and occurrences were left pointing at a series row that no longer existed.
+   */
+  it('detaches the occurrences it produced rather than deleting them', async () => {
+    dbMock.queueMany([row()], []);
+    await service.deleteSeries('s1', 'u1');
+
+    const set = dbMock.trace.find((c) => c.method === 'set')?.args[0] as Record<string, unknown>;
+    expect(set).toMatchObject({ seriesId: null });
+    // One delete only — the series. The occurrences record days the user
+    // actually completed and must survive.
+    expect(dbMock.trace.filter((c) => c.method === 'delete')).toHaveLength(1);
+  });
+
+  it('touches nothing when the series belongs to someone else', async () => {
+    dbMock.queueRows([]);
+    await expect(service.deleteSeries('s1', 'u2')).rejects.toThrow();
+
+    expect(dbMock.called('update')).toBe(false);
+  });
 });

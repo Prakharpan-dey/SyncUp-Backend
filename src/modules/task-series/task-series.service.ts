@@ -2,7 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 
 import { AppError } from '../../core/errors/app-errors.js';
 import { db } from '../../core/db/drizzle.js';
-import { taskSeries } from '../../core/db/schema/index.js';
+import { taskSeries, tasks } from '../../core/db/schema/index.js';
 
 /**
  * Module-level, not a method.
@@ -108,11 +108,32 @@ export class TaskSeriesService {
     return serializeSeries(updated);
   }
 
+  /**
+   * Removes a series and detaches the occurrences it produced.
+   *
+   * `tasks.series_id` deliberately has no foreign key — occurrences reach the
+   * server through an outbox that can deliver them before their series, and a
+   * constraint violation there is parked as permanent. The cost is that nothing
+   * cleaned up after a delete, so occurrences were left pointing at a series row
+   * that no longer existed.
+   *
+   * They are detached rather than deleted: they record days the user actually
+   * completed, and losing that history to remove a rule would be the worse
+   * outcome. They simply become ordinary one-off tasks.
+   *
+   * The delete runs first so an attempt on someone else's series 404s before
+   * anything is touched.
+   */
   async deleteSeries(seriesId: string, userId: string) {
     const [deleted] = await db
       .delete(taskSeries)
       .where(and(eq(taskSeries.id, seriesId), eq(taskSeries.userId, userId)))
       .returning();
     if (!deleted) throw new AppError(404, 'Series not found', 'NOT_FOUND');
+
+    await db
+      .update(tasks)
+      .set({ seriesId: null, updatedAt: new Date() })
+      .where(and(eq(tasks.seriesId, seriesId), eq(tasks.userId, userId)));
   }
 }
