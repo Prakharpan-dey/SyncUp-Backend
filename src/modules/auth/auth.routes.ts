@@ -2,6 +2,8 @@ import { FastifyInstance, FastifyReply } from 'fastify';
 import { authGuard } from '../../core/middleware/auth.middleware.js';
 import { AppError } from '../../core/errors/app-errors.js';
 import { AuthService } from './auth.service.js';
+import { assertSignupAllowed, recordSignup } from './login-guard.js';
+import { accountOrIpKey } from '../../core/security/rate-limit-key.js';
 import {
   verifiedPage,
   invalidTokenPage,
@@ -68,6 +70,10 @@ export async function authRoutes(app: FastifyInstance) {
   // POST /auth/signup — public
   app.post('/signup', credentialRateLimit, async (request, reply) => {
     const body = signUpSchema.parse(request.body);
+    // The route limit is per address + email, so a fresh email each time
+    // walked straight past it. This caps accounts per address.
+    await assertSignupAllowed(request.ip);
+    await recordSignup(request.ip);
     const result = await service.signUp(body);
     return reply.status(201).send(result);
   });
@@ -79,6 +85,7 @@ export async function authRoutes(app: FastifyInstance) {
       body.email,
       body.password,
       body.device_label,
+      request.ip,
     );
     return reply.send(result);
   });
@@ -127,9 +134,13 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   // POST /auth/delete — protected, and re-authenticates
-  app.post('/delete', { preHandler: [authGuard] }, async (request, reply) => {
+  app.post('/delete', {
+    preHandler: [authGuard],
+    // Re-checks the password, so it gets the credential endpoints' budget.
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes', keyGenerator: accountOrIpKey } },
+  }, async (request, reply) => {
     const body = deleteAccountSchema.parse(request.body);
-    await service.deleteAccount(request.userId, body.password);
+    await service.deleteAccount(request.userId, body.password, request.ip);
     return reply.status(204).send();
   });
 
@@ -145,7 +156,7 @@ export async function authRoutes(app: FastifyInstance) {
   // their own address, so this cannot be used to spam someone else's inbox.
   app.post('/verify-email/request', {
     preHandler: [authGuard],
-    config: { rateLimit: { max: 3, timeWindow: '15 minutes' } },
+    config: { rateLimit: { max: 3, timeWindow: '15 minutes', keyGenerator: accountOrIpKey } },
   }, async (request, reply) => {
     const result = await service.requestEmailVerification(request.userId);
     return reply.send(result);
@@ -260,13 +271,14 @@ export async function authRoutes(app: FastifyInstance) {
   // POST /auth/change-password — protected
   app.post('/change-password', {
     preHandler: [authGuard],
-    config: { rateLimit: { max: 5, timeWindow: '15 minutes' } },
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes', keyGenerator: accountOrIpKey } },
   }, async (request, reply) => {
     const body = changePasswordSchema.parse(request.body);
     await service.changePassword(
       request.userId,
       body.current_password,
       body.new_password,
+      request.ip,
     );
     return reply.status(204).send();
   });

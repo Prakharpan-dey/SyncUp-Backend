@@ -73,7 +73,7 @@ export async function accountRoutes(app: FastifyInstance) {
     }
 
     try {
-      await service.deleteAccountByCredentials(email, password);
+      await service.deleteAccountByCredentials(email, password, request.ip);
       return reply.send(accountDeletedPage());
     } catch (err) {
       if (err instanceof AppError && err.statusCode === 401) {

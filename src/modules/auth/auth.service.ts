@@ -10,6 +10,7 @@ import { AppError } from '../../core/errors/app-errors.js';
 import { env } from '../../core/config/env.js';
 import { AuthTokenService } from './auth-token.service.js';
 import { verificationEmail, passwordResetEmail } from './emails/templates.js';
+import { assertNotLockedOut, clearLoginFailures, recordLoginFailure } from './login-guard.js';
 
 /** The transaction handle Drizzle hands to `db.transaction`. */
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -25,22 +26,6 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * longer than that to reach the server read as an attack and ended the session.
  */
 const REFRESH_REUSE_GRACE_MS = 60_000;
-
-/**
- * Account-scoped brute-force lockout.
- *
- * The IP+email rate limit on the route stops one address hammering one account,
- * but the key includes the IP — so N addresses each get their own budget
- * against the same email, and a distributed attempt is effectively unthrottled.
- * This counter is keyed on the email alone.
- *
- * Counted for unknown addresses too. Only locking accounts that exist would
- * make the lockout itself an existence oracle: a 429 would mean "real account",
- * a 401 would mean "no such user".
- */
-const LOGIN_FAIL_LIMIT = 10;
-const LOGIN_FAIL_WINDOW_SECONDS = 15 * 60;
-const loginFailKey = (email: string) => `login:fail:${email}`;
 
 /**
  * A throwaway hash to compare against when no account matches, so a failed
@@ -152,8 +137,8 @@ export class AuthService {
     };
   }
 
-  async login(email: string, password: string, deviceLabel?: string) {
-    await this.assertNotLockedOut(email);
+  async login(email: string, password: string, deviceLabel?: string, ip?: string) {
+    await assertNotLockedOut(email, ip);
 
     const [user] = await db
       .select()
@@ -169,13 +154,13 @@ export class AuthService {
     const valid = await comparePassword(password, hashToCompare);
 
     if (!user || !user.passwordHash || !valid) {
-      await this.recordLoginFailure(email);
+      await recordLoginFailure(email, ip);
       throw new AppError(401, 'Invalid credentials', 'UNAUTHORIZED');
     }
 
     // A correct password clears the slate, so a user who mistypes a few times
     // and then succeeds is not carrying a countdown into their next session.
-    await redis.del(loginFailKey(email)).catch(() => {});
+    await clearLoginFailures(email, ip);
 
     const { accessToken, refreshToken } = await this.generateTokenPair(user.id, {
       deviceLabel: deviceLabel ?? null,
@@ -427,7 +412,7 @@ export class AuthService {
    * Two things must be handled before the cascade runs, and both are inside the
    * same transaction so a failure leaves the account intact.
    */
-  async deleteAccount(userId: string, password: string) {
+  async deleteAccount(userId: string, password: string, ip?: string) {
     const [user] = await db
       .select()
       .from(users)
@@ -442,8 +427,13 @@ export class AuthService {
     // An OAuth-created user has no password hash and therefore nothing to
     // confirm against; identity there rests on the token alone.
     if (user.passwordHash) {
+      // Shares the sign-in counters, so this is no side door for guessing.
+      await assertNotLockedOut(user.email, ip);
       const valid = await comparePassword(password, user.passwordHash);
-      if (!valid) throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
+      if (!valid) {
+        await recordLoginFailure(user.email, ip);
+        throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
+      }
     }
 
     await this.performDeletion(userId);
@@ -458,7 +448,9 @@ export class AuthService {
    * password — an unauthenticated endpoint that distinguishes them tells an
    * attacker which emails are registered.
    */
-  async deleteAccountByCredentials(email: string, password: string) {
+  async deleteAccountByCredentials(email: string, password: string, ip?: string) {
+    await assertNotLockedOut(email, ip);
+
     const [user] = await db
       .select()
       .from(users)
@@ -471,6 +463,7 @@ export class AuthService {
     const valid = await comparePassword(password, hashToCompare);
 
     if (!user || !user.passwordHash || !valid) {
+      await recordLoginFailure(email, ip);
       throw new AppError(401, 'Invalid email or password', 'UNAUTHORIZED');
     }
 
@@ -531,44 +524,18 @@ export class AuthService {
   }
 
   /**
-   * Removes the user's reactions and comments from *other* people's feed items.
+   * Keeps the reaction counts on *other* people's posts honest before the
+   * user's reaction rows go with the cascade.
    *
-   * Their own items go with the cascade, but these live as JSONB arrays on rows
-   * belonging to someone else, so nothing would otherwise clear them.
+   * One indexed statement (`idx_feed_reactions_user_id`). While reactions were
+   * a JSONB array on each post, this scanned every post in the table twice.
    */
   private async scrubUserFromFeedInteractions(tx: Transaction, userId: string) {
-    const marker = JSON.stringify([{ user_id: userId }]);
-
-    // Both SET expressions read the pre-update column value, so filtering and
-    // recounting in one statement is consistent.
     await tx.execute(sql`
-      UPDATE feed_items SET
-        reactions = (
-          SELECT COALESCE(jsonb_agg(e), '[]'::jsonb)
-          FROM jsonb_array_elements(reactions) e
-          WHERE e->>'user_id' <> ${userId}
-        ),
-        reaction_count = (
-          SELECT COUNT(*)
-          FROM jsonb_array_elements(reactions) e
-          WHERE e->>'user_id' <> ${userId}
-        )
-      WHERE reactions @> ${marker}::jsonb
-    `);
-
-    await tx.execute(sql`
-      UPDATE feed_items SET
-        comments = (
-          SELECT COALESCE(jsonb_agg(e), '[]'::jsonb)
-          FROM jsonb_array_elements(comments) e
-          WHERE e->>'user_id' <> ${userId}
-        ),
-        comment_count = (
-          SELECT COUNT(*)
-          FROM jsonb_array_elements(comments) e
-          WHERE e->>'user_id' <> ${userId}
-        )
-      WHERE comments @> ${marker}::jsonb
+      UPDATE feed_items f
+      SET reaction_count = GREATEST(f.reaction_count - 1, 0)
+      FROM feed_reactions r
+      WHERE r.user_id = ${userId} AND r.feed_item_id = f.id
     `);
   }
 
@@ -659,7 +626,7 @@ export class AuthService {
     await this.revokeAllSessions(userId);
   }
 
-  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+  async changePassword(userId: string, currentPassword: string, newPassword: string, ip?: string) {
     const [user] = await db.select().from(users)
       .where(eq(users.id, userId)).limit(1);
     if (!user) throw new AppError(404, 'User not found', 'NOT_FOUND');
@@ -668,8 +635,12 @@ export class AuthService {
       throw new AppError(400, 'This account signs in with Google', 'BAD_REQUEST');
     }
 
+    await assertNotLockedOut(user.email, ip);
     const valid = await comparePassword(currentPassword, user.passwordHash);
-    if (!valid) throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
+    if (!valid) {
+      await recordLoginFailure(user.email, ip);
+      throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
+    }
 
     if (await comparePassword(newPassword, user.passwordHash)) {
       throw new AppError(400, 'New password must differ from the current one', 'BAD_REQUEST');
@@ -749,39 +720,5 @@ export class AuthService {
       created_at: safe.createdAt.toISOString(),
       updated_at: safe.updatedAt.toISOString(),
     };
-  }
-
-  /**
-   * Rejects further attempts once an address has failed too many times.
-   *
-   * Redis failures are swallowed: an outage should degrade to "no lockout"
-   * rather than locking everyone out of their accounts.
-   */
-  private async assertNotLockedOut(email: string) {
-    let failures = 0;
-    try {
-      failures = Number(await redis.get(loginFailKey(email))) || 0;
-    } catch {
-      return;
-    }
-
-    if (failures >= LOGIN_FAIL_LIMIT) {
-      throw new AppError(
-        429,
-        'Too many failed sign-in attempts. Try again later.',
-        'TOO_MANY_ATTEMPTS',
-      );
-    }
-  }
-
-  /** Counts a failure against the address, on a sliding window from the first. */
-  private async recordLoginFailure(email: string) {
-    try {
-      const key = loginFailKey(email);
-      const count = await redis.incr(key);
-      if (count === 1) await redis.expire(key, LOGIN_FAIL_WINDOW_SECONDS);
-    } catch {
-      // Not worth failing the request over.
-    }
   }
 }

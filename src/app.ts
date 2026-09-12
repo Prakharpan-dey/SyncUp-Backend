@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { env } from './core/config/env.js';
 import { redis } from './core/redis/redis.js';
+import { accountOrIpKey } from './core/security/rate-limit-key.js';
 import { errorHandler } from './core/middleware/error-handler.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { accountRoutes } from './modules/account/account.routes.js';
@@ -20,6 +21,11 @@ import { notificationRoutes } from './modules/notifications/notifications.routes
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
+    // Railway terminates every connection at its proxy, so without this
+    // `request.ip` is the proxy's address and every IP-keyed rate limit is one
+    // bucket shared by all users. The container is only reachable through
+    // that proxy, so its X-Forwarded-For can be trusted.
+    trustProxy: true,
     logger: {
       level: env.LOG_LEVEL,
       // Keep credentials out of logs even if LOG_LEVEL is turned up in production.
@@ -50,6 +56,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     max: 100,
     timeWindow: '1 minute',
     redis,
+    // Per account when signed in, else per address — see rate-limit-key.ts.
+    keyGenerator: accountOrIpKey,
     // Without this, a Redis outage takes the whole API down — every request,
     // including /health, fails on the store lookup before reaching a handler.
     // Degrading to unlimited is far better than being unavailable; the outage
