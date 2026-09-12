@@ -48,11 +48,12 @@ export class UsersService {
   /// whole user base a few characters at a time, which is a privacy problem
   /// with no upside here.
   ///
-  /// Matching is case-insensitive because usernames are unique on
-  /// lower(username), so `Prakhar` and `prakhar` are necessarily the same
-  /// account. The uq_users_username_lower index serves this directly.
+  /// Matching is exact, capitals included: `Sakshi` does not find `@sakshi`.
+  /// Uniqueness stays case-insensitive (uq_users_username_lower), so two
+  /// accounts can never differ only by case and nobody can register a
+  /// lookalike of someone else's handle.
   async searchUsers(query: string, currentUserId: string) {
-    const handle = query.trim().toLowerCase();
+    const handle = query.trim();
     if (handle.length === 0) return [];
 
     // Correlated on users.id, so it is evaluated for the candidate row rather
@@ -109,7 +110,7 @@ export class UsersService {
       .where(
         and(
           ne(users.id, currentUserId),
-          eq(sql`lower(${users.username})`, handle),
+          eq(users.username, handle),
           notBlockedEitherWay,
           // 'friends' used to fall through this filter and behave exactly like
           // 'none', so anyone who picked "Friends only" became invisible to

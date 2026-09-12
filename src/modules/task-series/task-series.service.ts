@@ -124,12 +124,29 @@ export class TaskSeriesService {
    * The delete runs first so an attempt on someone else's series 404s before
    * anything is touched.
    */
-  async deleteSeries(seriesId: string, userId: string) {
+  /**
+   * Deletes the rule. With [deletePending], its pending days go too — missed
+   * past ones included — while completed days are kept and detached below, so
+   * history and streaks survive. Without it, every day is detached and kept.
+   */
+  async deleteSeries(
+    seriesId: string,
+    userId: string,
+    { deletePending = false }: { deletePending?: boolean } = {},
+  ) {
     const [deleted] = await db
       .delete(taskSeries)
       .where(and(eq(taskSeries.id, seriesId), eq(taskSeries.userId, userId)))
       .returning();
     if (!deleted) throw new AppError(404, 'Series not found', 'NOT_FOUND');
+
+    if (deletePending) {
+      await db.delete(tasks).where(and(
+        eq(tasks.seriesId, seriesId),
+        eq(tasks.userId, userId),
+        eq(tasks.status, 'pending'),
+      ));
+    }
 
     await db
       .update(tasks)

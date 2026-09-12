@@ -23,6 +23,20 @@ export const groupMemberParamsSchema = z.object({
   userId: z.string().uuid(),
 });
 
+export const groupRequestParamsSchema = z.object({
+  id: z.string().uuid(),
+  requestId: z.string().uuid(),
+});
+
+export const inviteParamsSchema = z.object({
+  inviteId: z.string().uuid(),
+});
+
+export const groupInviteParamsSchema = z.object({
+  id: z.string().uuid(),
+  inviteId: z.string().uuid(),
+});
+
 export const tokenParamSchema = z.object({
   token: z.string().min(1).max(100),
 });

@@ -9,5 +9,7 @@ export * from './attendance-sessions.js';
 export * from './friendships.js';
 export * from './groups.js';
 export * from './group-members.js';
+export * from './group-join-requests.js';
+export * from './group-invites.js';
 export * from './feed-items.js';
 export * from './notifications.js';

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { FastifyInstance } from 'fastify';
 
 import { authGuard } from '../../core/middleware/auth.middleware.js';
@@ -25,9 +26,13 @@ export async function taskSeriesRoutes(app: FastifyInstance) {
     return reply.send(await service.updateSeries(id, request.userId, body));
   });
 
+  // ?pending=delete also removes the pending days; completed ones always stay.
   app.delete('/:id', async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);
-    await service.deleteSeries(id, request.userId);
+    const { pending } = z
+      .object({ pending: z.enum(['delete']).optional() })
+      .parse(request.query ?? {});
+    await service.deleteSeries(id, request.userId, { deletePending: pending === 'delete' });
     return reply.status(204).send();
   });
 }

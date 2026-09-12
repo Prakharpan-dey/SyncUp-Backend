@@ -41,6 +41,10 @@ const PREFERENCE_KEY: Record<Exclude<NotificationType, UnmanagedType>, string> =
   friend_request: 'friend_requests',
   reaction: 'reactions',
   comment: 'comments',
+  // Its own key rather than reusing friend_requests, so it can be muted
+  // separately later. Nothing sets it yet, and an absent key counts as enabled.
+  group_request: 'group_requests',
+  group_invite: 'group_requests',
 };
 
 /** The preference key for a type, or undefined when the type carries none. */

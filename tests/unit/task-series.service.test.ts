@@ -127,6 +127,18 @@ describe('changing a series', () => {
     expect(dbMock.trace.filter((c) => c.method === 'delete')).toHaveLength(1);
   });
 
+  /** Deleting permanently: pending days go, completed days stay. */
+  it('deletes the pending days when asked, still detaching the rest', async () => {
+    dbMock.queueMany([row()], [], []);
+    await service.deleteSeries('s1', 'u1', { deletePending: true });
+
+    // Two deletes: the series, then its pending tasks. The detach still runs,
+    // which is what keeps the completed days.
+    expect(dbMock.trace.filter((c) => c.method === 'delete')).toHaveLength(2);
+    const set = dbMock.trace.find((c) => c.method === 'set')?.args[0] as Record<string, unknown>;
+    expect(set).toMatchObject({ seriesId: null });
+  });
+
   it('touches nothing when the series belongs to someone else', async () => {
     dbMock.queueRows([]);
     await expect(service.deleteSeries('s1', 'u2')).rejects.toThrow();

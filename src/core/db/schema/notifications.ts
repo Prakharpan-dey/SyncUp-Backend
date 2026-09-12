@@ -3,7 +3,7 @@ import { users } from './users.js';
 
 export const notificationTypeEnum = pgEnum('notification_type', [
   'task_reminder', 'attendance_warning', 'friend_request',
-  'reaction', 'comment', 'daily_digest',
+  'reaction', 'comment', 'daily_digest', 'group_request', 'group_invite',
 ]);
 
 export const notifications = pgTable('notifications', {

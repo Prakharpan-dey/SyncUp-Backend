@@ -29,6 +29,13 @@
       "when": 1788550357187,
       "tag": "0003_safe_bushwacker",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789177896710,
+      "tag": "0004_group_membership",
+      "breakpoints": true
     }
   ]
 }
