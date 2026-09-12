@@ -1,10 +1,8 @@
 import { db } from '../../core/db/drizzle.js';
-import { feedItems, friendships, groupMembers, groups, users } from '../../core/db/schema/index.js';
-import { eq, and, or, lt, desc, inArray, sql } from 'drizzle-orm';
+import { feedItems, feedReactions, users } from '../../core/db/schema/index.js';
+import { eq, and, sql, type SQL } from 'drizzle-orm';
 import { enqueueNotification } from '../../core/queues/notification.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
-
-type Reaction = { user_id: string; emoji: string; created_at: string };
 
 /** How many plan lines travel in a feed card. */
 const PLAN_ITEM_LIMIT = 10;
@@ -29,158 +27,276 @@ function serializePlan(row: typeof feedItems.$inferSelect) {
   };
 }
 
+/** A page position: the last row's exact timestamp and id. */
+type FeedCursor = { at: string; id: string };
+
+const MAX_UUID = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Postgres `timestamp::text`, or the ISO string older builds send. */
+const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z?$/;
+
+/**
+ * Opaque to the client: base64url of the last row's exact timestamp and id.
+ *
+ * The cursor used to be `created_at` alone, rounded to milliseconds by
+ * `toISOString()` while Postgres stores microseconds — so rows sharing a
+ * millisecond (the feed worker writes a post and its group copies in one
+ * statement) could be skipped between pages. Paging on (timestamp, id) at full
+ * precision cannot skip or repeat a row.
+ */
+export function encodeFeedCursor(at: string, id: string): string {
+  return Buffer.from(`${at}|${id}`, 'utf8').toString('base64url');
+}
+
+export function decodeFeedCursor(cursor: string): FeedCursor {
+  // An app still on the old build sends the bare ISO timestamp.
+  if (TIMESTAMP_RE.test(cursor)) return { at: cursor, id: MAX_UUID };
+
+  const [at, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+  if (!at || !id || !TIMESTAMP_RE.test(at) || !UUID_RE.test(id)) {
+    throw new AppError(400, 'Invalid feed cursor', 'BAD_REQUEST');
+  }
+  return { at, id };
+}
+
+/** A feed row as the page query returns it. */
+type FeedRow = {
+  id: string;
+  user_id: string;
+  actor_name: string;
+  actor_photo_url: string | null;
+  type: string;
+  title: string;
+  summary: string | null;
+  metadata: unknown;
+  visibility: string;
+  group_id: string | null;
+  group_name: string | null;
+  reaction_count: number;
+  reacted: boolean;
+  created_at_iso: string;
+  created_at_raw: string;
+};
+
+/**
+ * The columns a card needs, read inside the per-source scan. Never
+ * `reactions` or `comments`: every page used to ship both arrays whole.
+ */
+const CARD_COLUMNS = sql.raw(
+  'id, user_id, actor_name, actor_photo_url, type, title, summary, metadata, ' +
+  'visibility, group_id, reaction_count, created_at',
+);
+
+/** Newest first. Written to match the indexes' DESC NULLS LAST exactly. */
+const NEWEST_FIRST = sql.raw('created_at DESC NULLS LAST, id DESC NULLS LAST');
+
+const afterCursor = (cursor: FeedCursor | null): SQL =>
+  cursor ? sql`AND (created_at, id) < (${cursor.at}::timestamp, ${cursor.id}::uuid)` : sql``;
+
+/** The final page, with "did I react" and both timestamp forms. */
+const pageSelect = (viewerId: string, groupName: SQL): SQL => sql`
+  SELECT p.id, p.user_id, p.actor_name, p.actor_photo_url, p.type, p.title,
+         p.summary, p.metadata, p.visibility, p.group_id, ${groupName} AS group_name,
+         p.reaction_count,
+         EXISTS (
+           SELECT 1 FROM feed_reactions r
+           WHERE r.feed_item_id = p.id AND r.user_id = ${viewerId}
+         ) AS reacted,
+         to_char(p.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
+         p.created_at::text AS created_at_raw
+`;
+
+/**
+ * One friend-feed page in one statement.
+ *
+ * For each friend (and yourself) it walks that person's newest posts on
+ * `idx_feed_items_user_created` and stops after a page, then merges. The work
+ * is bounded by friends x page size, however active or quiet they are — the old
+ * `user_id IN (...) ORDER BY created_at` either walked time skipping strangers'
+ * posts or gathered every friend's history and sorted it.
+ */
+function friendsPage(viewerId: string, cursor: FeedCursor | null, n: number): SQL {
+  return sql`
+    WITH sources AS (
+      SELECT CASE WHEN f.requester_id = ${viewerId} THEN f.addressee_id ELSE f.requester_id END AS id
+      FROM friendships f
+      WHERE (f.requester_id = ${viewerId} OR f.addressee_id = ${viewerId})
+        AND f.status = 'accepted'
+      UNION
+      SELECT ${viewerId}::uuid
+    ),
+    page AS (
+      SELECT fi.* FROM sources
+      CROSS JOIN LATERAL (
+        SELECT ${CARD_COLUMNS} FROM feed_items
+        WHERE user_id = sources.id AND visibility = 'friends' ${afterCursor(cursor)}
+        ORDER BY ${NEWEST_FIRST}
+        LIMIT ${n}
+      ) fi
+      ORDER BY ${NEWEST_FIRST}
+      LIMIT ${n}
+    )
+    ${pageSelect(viewerId, sql`NULL::text`)}
+    FROM page p
+    ORDER BY p.created_at DESC NULLS LAST, p.id DESC NULLS LAST
+  `;
+}
+
+/** One group-feed page: the same shape over your groups, names joined in. */
+function groupsPage(viewerId: string, cursor: FeedCursor | null, n: number): SQL {
+  return sql`
+    WITH sources AS (
+      SELECT gm.group_id AS id FROM group_members gm WHERE gm.user_id = ${viewerId}
+    ),
+    page AS (
+      SELECT fi.* FROM sources
+      CROSS JOIN LATERAL (
+        SELECT ${CARD_COLUMNS} FROM feed_items
+        WHERE group_id = sources.id AND visibility = 'group' ${afterCursor(cursor)}
+        ORDER BY ${NEWEST_FIRST}
+        LIMIT ${n}
+      ) fi
+      ORDER BY ${NEWEST_FIRST}
+      LIMIT ${n}
+    )
+    ${pageSelect(viewerId, sql`g.name`)}
+    FROM page p
+    LEFT JOIN groups g ON g.id = p.group_id
+    ORDER BY p.created_at DESC NULLS LAST, p.id DESC NULLS LAST
+  `;
+}
+
 export class FeedService {
-  /** User IDs whose 'friends'-visibility items this user may see (accepted friends + self). */
-  private async visibleFriendIds(userId: string) {
-    const rows = await db.select().from(friendships)
-      .where(and(
-        or(eq(friendships.requesterId, userId), eq(friendships.addresseeId, userId)),
-        eq(friendships.status, 'accepted'),
-      ));
-    return [
-      ...rows.map(r => r.requesterId === userId ? r.addresseeId : r.requesterId),
-      userId,
-    ];
-  }
-
-  /** Group IDs this user belongs to. */
-  private async memberGroupIds(userId: string) {
-    const memberships = await db.select().from(groupMembers)
-      .where(eq(groupMembers.userId, userId));
-    return memberships.map(m => m.groupId);
-  }
-
   /**
-   * Throws 404 unless the user may see this feed item — same predicate getFeed
-   * uses. 404 rather than 403 so feed item IDs cannot be probed for existence.
+   * Throws 404 unless the user may see this feed item — the same rule the feed
+   * uses. 404 rather than 403 so feed item ids cannot be probed for existence.
+   * One query; it used to load every friend and group id first.
    */
   private async assertCanAccessItem(feedItemId: string, userId: string) {
-    const [item] = await db.select({
-      userId: feedItems.userId,
-      visibility: feedItems.visibility,
-      groupId: feedItems.groupId,
-    }).from(feedItems).where(eq(feedItems.id, feedItemId)).limit(1);
+    const rows = (await db.execute(sql`
+      SELECT 1 FROM feed_items fi
+      WHERE fi.id = ${feedItemId} AND (
+        (fi.visibility = 'friends' AND (
+          fi.user_id = ${userId} OR EXISTS (
+            SELECT 1 FROM friendships f
+            WHERE f.status = 'accepted' AND (
+              (f.requester_id = ${userId} AND f.addressee_id = fi.user_id) OR
+              (f.addressee_id = ${userId} AND f.requester_id = fi.user_id)
+            )
+          )
+        ))
+        OR (fi.visibility = 'group' AND EXISTS (
+          SELECT 1 FROM group_members gm
+          WHERE gm.group_id = fi.group_id AND gm.user_id = ${userId}
+        ))
+      )
+      LIMIT 1
+    `)) as unknown as unknown[];
 
-    if (!item) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
-
-    const visible = item.visibility === 'friends'
-      ? (await this.visibleFriendIds(userId)).includes(item.userId)
-      : item.groupId !== null && (await this.memberGroupIds(userId)).includes(item.groupId);
-
-    if (!visible) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
+    if (rows.length === 0) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
   }
 
   async getFeed(userId: string, tab: string, cursor?: string, limit = 20) {
-    const conditions = [];
+    const after = cursor ? decodeFeedCursor(cursor) : null;
+    // One extra row says whether there is another page.
+    const n = limit + 1;
+    const query = tab === 'friends'
+      ? friendsPage(userId, after, n)
+      : groupsPage(userId, after, n);
 
-    if (tab === 'friends') {
-      conditions.push(eq(feedItems.visibility, 'friends'));
-      conditions.push(inArray(feedItems.userId, await this.visibleFriendIds(userId)));
-    } else {
-      const groupIds = await this.memberGroupIds(userId);
-      if (groupIds.length === 0) return { items: [], next_cursor: null };
-
-      conditions.push(eq(feedItems.visibility, 'group'));
-      conditions.push(inArray(feedItems.groupId, groupIds));
-    }
-
-    if (cursor) {
-      conditions.push(lt(feedItems.createdAt, new Date(cursor)));
-    }
-
-    const items = await db.select().from(feedItems)
-      .where(and(...conditions))
-      .orderBy(desc(feedItems.createdAt))
-      .limit(limit + 1);
-
-    const hasMore = items.length > limit;
-    const pageItems = hasMore ? items.slice(0, limit) : items;
-    const nextCursor = hasMore ? pageItems[pageItems.length - 1].createdAt.toISOString() : null;
-
-    // Group items carry only a group_id, which says nothing to a reader who is
-    // in several groups. One lookup for the page rather than per item.
-    const groupIds = [...new Set(pageItems.flatMap(i => i.groupId ? [i.groupId] : []))];
-    const groupNames = groupIds.length === 0
-      ? new Map<string, string>()
-      : new Map(
-        (await db.select({ id: groups.id, name: groups.name })
-          .from(groups).where(inArray(groups.id, groupIds)))
-          .map(g => [g.id, g.name] as const),
-      );
+    const rows = (await db.execute(query)) as unknown as FeedRow[];
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
 
     return {
-      items: pageItems.map(item => ({
-        id: item.id,
-        actor_id: item.userId,
-        actor_name: item.actorName,
-        actor_photo_url: item.actorPhotoUrl,
-        type: item.type,
-        title: item.title,
-        summary: item.summary,
-        metadata: item.metadata,
-        visibility: item.visibility,
-        group_id: item.groupId,
-        group_name: item.groupId ? groupNames.get(item.groupId) ?? null : null,
-        reaction_count: item.reactionCount,
-        // Whether this viewer has already reacted, so the client can render the
-        // toggled state instead of guessing.
-        reacted: ((item.reactions ?? []) as Reaction[]).some(r => r.user_id === userId),
-        created_at: item.createdAt.toISOString(),
+      items: page.map((row) => ({
+        id: row.id,
+        actor_id: row.user_id,
+        actor_name: row.actor_name,
+        actor_photo_url: row.actor_photo_url,
+        type: row.type,
+        title: row.title,
+        summary: row.summary,
+        metadata: row.metadata,
+        visibility: row.visibility,
+        group_id: row.group_id,
+        group_name: row.group_name,
+        reaction_count: row.reaction_count,
+        // Whether this viewer has already reacted, so the client can render
+        // the toggled state instead of guessing.
+        reacted: row.reacted,
+        created_at: row.created_at_iso,
       })),
-      next_cursor: nextCursor,
+      next_cursor: hasMore && last ? encodeFeedCursor(last.created_at_raw, last.id) : null,
     };
   }
 
   /**
-   * Applies one reaction per user, toggling.
+   * One reaction per person per post: the same emoji again removes it, a
+   * different one replaces it.
    *
-   * Reacting used to append unconditionally, so a single user tapping five
-   * times drove reaction_count to 5 — the number measured taps, not people.
-   * Tapping the same emoji again now removes it, and a different emoji
-   * replaces the previous one.
-   *
-   * The row is locked for the read-modify-write because the count is derived
-   * from the array; two concurrent reactions would otherwise both write a
-   * count computed from the same stale copy.
+   * A row per reaction, so this is a short transaction on one indexed row plus
+   * an atomic count — it used to lock the post and rewrite its whole JSONB
+   * array. The insert is ON CONFLICT DO NOTHING and the count moves only when a
+   * row actually went in or out, so a double tap cannot double-count.
    */
   async react(feedItemId: string, userId: string, emoji: string) {
     await this.assertCanAccessItem(feedItemId, userId);
 
-    return db.transaction(async (tx) => {
-      const [item] = await tx
-        .select({ reactions: feedItems.reactions })
-        .from(feedItems)
-        .where(eq(feedItems.id, feedItemId))
+    const mineWhere = and(
+      eq(feedReactions.feedItemId, feedItemId),
+      eq(feedReactions.userId, userId),
+    );
+
+    const outcome = await db.transaction(async (tx) => {
+      const [mine] = await tx
+        .select({ emoji: feedReactions.emoji })
+        .from(feedReactions)
+        .where(mineWhere)
         .for('update')
         .limit(1);
 
-      if (!item) throw new AppError(404, 'Feed item not found', 'NOT_FOUND');
-
-      const existing = (item.reactions ?? []) as Reaction[];
-      const mine = existing.find((r) => r.user_id === userId);
-      const others = existing.filter((r) => r.user_id !== userId);
-
-      // Same emoji again means "undo"; anything else replaces.
-      const removing = mine?.emoji === emoji;
-      const next = removing
-        ? others
-        : [...others, { user_id: userId, emoji, created_at: new Date().toISOString() }];
-
-      await tx
-        .update(feedItems)
-        .set({ reactions: next, reactionCount: next.length })
-        .where(eq(feedItems.id, feedItemId));
-
-      // Only a new reaction is worth a notification — not an undo, and not
-      // swapping one emoji for another on a post already reacted to.
-      if (!removing && !mine) {
-        void this.notifyOwner(feedItemId, userId, 'reaction', `reacted ${emoji} to your post`);
+      if (mine?.emoji === emoji) {
+        const removed = await tx.delete(feedReactions).where(mineWhere)
+          .returning({ userId: feedReactions.userId });
+        const [item] = await tx.update(feedItems)
+          .set({ reactionCount: sql`GREATEST(${feedItems.reactionCount} - ${removed.length}, 0)` })
+          .where(eq(feedItems.id, feedItemId))
+          .returning({ reactionCount: feedItems.reactionCount });
+        return { reacted: false, count: item?.reactionCount ?? 0, isNew: false };
       }
 
-      return { reacted: !removing, reaction_count: next.length };
-    });
-  }
+      if (mine) {
+        await tx.update(feedReactions).set({ emoji }).where(mineWhere);
+        const [item] = await tx
+          .select({ reactionCount: feedItems.reactionCount })
+          .from(feedItems)
+          .where(eq(feedItems.id, feedItemId))
+          .limit(1);
+        return { reacted: true, count: item?.reactionCount ?? 0, isNew: false };
+      }
 
+      const inserted = await tx.insert(feedReactions)
+        .values({ feedItemId, userId, emoji })
+        .onConflictDoNothing()
+        .returning({ userId: feedReactions.userId });
+      const [item] = await tx.update(feedItems)
+        .set({ reactionCount: sql`${feedItems.reactionCount} + ${inserted.length}` })
+        .where(eq(feedItems.id, feedItemId))
+        .returning({ reactionCount: feedItems.reactionCount });
+      return { reacted: true, count: item?.reactionCount ?? 0, isNew: inserted.length > 0 };
+    });
+
+    // Only a new reaction is worth a notification — not an undo, and not
+    // swapping one emoji for another on a post already reacted to. Sent after
+    // the commit, so a rolled-back reaction never notifies anyone.
+    if (outcome.isNew) {
+      void this.notifyOwner(feedItemId, userId, 'reaction', `reacted ${emoji} to your post`);
+    }
+
+    return { reacted: outcome.reacted, reaction_count: outcome.count };
+  }
 
   /**
    * Tells the item's owner someone interacted with it.

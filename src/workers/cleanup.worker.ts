@@ -1,4 +1,4 @@
-import { and, eq, lt, or } from 'drizzle-orm';
+import { and, eq, lt, or, sql } from 'drizzle-orm';
 
 import { db } from '../core/db/drizzle.js';
 import { refreshTokens, authTokens } from '../core/db/schema/index.js';
@@ -54,12 +54,56 @@ export async function pruneTokens(): Promise<void> {
   );
 }
 
+/** Feed posts older than this are deleted. */
+export const FEED_RETENTION_DAYS = 30;
+/** Rows per DELETE, so no single statement holds locks or floods the WAL. */
+export const FEED_PRUNE_BATCH = 10_000;
+/** A backstop so one run can never loop forever (5M rows). */
+const FEED_PRUNE_MAX_BATCHES = 500;
+
+/**
+ * Deletes feed posts past the retention window, in batches.
+ *
+ * Nothing pruned `feed_items` before, and at scale it takes in over a million
+ * rows a day. Deleting in id-bounded batches with a short pause keeps each
+ * statement small; reactions go with the cascade. Idempotent like
+ * `pruneTokens`, so two replicas running it at once is harmless.
+ *
+ * Returns how many rows went.
+ */
+export async function pruneFeedItems(
+  { pauseMs = 200, maxBatches = FEED_PRUNE_MAX_BATCHES } = {},
+): Promise<number> {
+  let total = 0;
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const deleted = (await db.execute(sql`
+      DELETE FROM feed_items WHERE id IN (
+        SELECT id FROM feed_items
+        WHERE created_at < now() - make_interval(days => ${FEED_RETENTION_DAYS})
+        LIMIT ${FEED_PRUNE_BATCH}
+      )
+      RETURNING 1
+    `)) as unknown as unknown[];
+
+    total += deleted.length;
+    if (deleted.length < FEED_PRUNE_BATCH) break;
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
+  }
+
+  console.log(`[Cleanup] Pruned ${total} feed item(s) older than ${FEED_RETENTION_DAYS} days`);
+  return total;
+}
+
 let timer: NodeJS.Timeout | null = null;
 
 export function startCleanupSchedule(): void {
   const run = () => {
     void pruneTokens().catch((err) => {
       console.error('[Cleanup] Sweep failed:', err instanceof Error ? err.message : err);
+    });
+    // Separate, so a failure in one sweep never skips the other.
+    void pruneFeedItems().catch((err) => {
+      console.error('[Cleanup] Feed prune failed:', err instanceof Error ? err.message : err);
     });
   };
 

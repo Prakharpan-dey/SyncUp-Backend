@@ -36,6 +36,20 @@
       "when": 1789177896710,
       "tag": "0004_group_membership",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789232512415,
+      "tag": "0005_feed_scale",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789232669948,
+      "tag": "0006_feed_reactions",
+      "breakpoints": true
     }
   ]
 }

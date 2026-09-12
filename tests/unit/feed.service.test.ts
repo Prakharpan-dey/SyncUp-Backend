@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-import { createDbMock, type Row } from '../helpers/db-mock.js';
+import { createDbMock } from '../helpers/db-mock.js';
 
 const dbMock = createDbMock();
 
@@ -13,135 +13,96 @@ const { FeedService } = await import('../../src/modules/feed/feed.service.js');
 const { enqueueNotification } = await import(
   '../../src/core/queues/notification.queue.js'
 );
+const { feedItems, feedReactions } = await import('../../src/core/db/schema/index.js');
 
 const AUTHOR = 'aaaaaaaa-0000-0000-0000-000000000001';
 const VIEWER = 'bbbbbbbb-0000-0000-0000-000000000002';
-const OTHER = 'cccccccc-0000-0000-0000-000000000003';
 const ITEM = 'dddddddd-0000-0000-0000-000000000004';
 
 /**
- * Queues the reads `react()` performs before it writes:
- *   1. assertCanAccessItem  — the feed item's owner and visibility
- *   2. visibleFriendIds     — the viewer's accepted friendships
- *   3. the locked re-read of the item's reactions array
+ * Queues the reads `react()` makes before it writes:
+ *   1. the access check — one row means "you may see this post"
+ *   2. your own reaction row on it, if any (locked)
  */
-function arrangeReact(existingReactions: Row[]) {
+function arrangeReact(mine: { emoji: string } | null) {
   dbMock.reset();
-  dbMock.queueMany(
-    [{ userId: AUTHOR, visibility: 'friends', groupId: null }],
-    [{ requesterId: AUTHOR, addresseeId: VIEWER, status: 'accepted' }],
-    [{ reactions: existingReactions }],
-  );
+  dbMock.queueMany([{ '?column?': 1 }], mine ? [mine] : []);
 }
 
-const reaction = (userId: string, emoji: string) => ({
-  user_id: userId,
-  emoji,
-  created_at: '2026-08-31T00:00:00.000Z',
-});
+/** Which table each write in the trace was aimed at. */
+const writesTo = (method: 'insert' | 'update' | 'delete') =>
+  dbMock.trace.filter((c) => c.method === method).map((c) => c.args[0]);
 
-describe('FeedService.react — one reaction per user', () => {
+/** notifyOwner is fire-and-forget; yield so it lands before asserting. */
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+describe('FeedService.react — one reaction per person', () => {
   let feed: InstanceType<typeof FeedService>;
-
   beforeEach(() => {
     vi.clearAllMocks();
     feed = new FeedService();
   });
 
-  it('records the first reaction', async () => {
-    arrangeReact([]);
-    const result = await feed.react(ITEM, VIEWER, '❤️');
-    expect(result).toEqual({ reacted: true, reaction_count: 1 });
+  it('records the first reaction as a row and bumps the count', async () => {
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
+
+    expect(await feed.react(ITEM, VIEWER, '❤️')).toEqual({ reacted: true, reaction_count: 1 });
+    expect(writesTo('insert')).toEqual([feedReactions]);
+    expect(writesTo('update')).toEqual([feedItems]);
   });
 
-  it('removes the reaction when the same emoji is sent again', async () => {
-    arrangeReact([reaction(VIEWER, '❤️')]);
-    expect(await feed.react(ITEM, VIEWER, '❤️')).toEqual({
-      reacted: false,
-      reaction_count: 0,
-    });
+  it('removes the row when the same emoji is sent again', async () => {
+    arrangeReact({ emoji: '❤️' });
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 0 }]);
+
+    expect(await feed.react(ITEM, VIEWER, '❤️')).toEqual({ reacted: false, reaction_count: 0 });
+    expect(writesTo('delete')).toEqual([feedReactions]);
+    expect(dbMock.called('insert')).toBe(false);
   });
 
-  it('replaces rather than adds when the emoji changes', async () => {
-    arrangeReact([reaction(VIEWER, '❤️')]);
-    // Still reacted, still one entry — swapping emoji is not a second vote.
-    expect(await feed.react(ITEM, VIEWER, '🔥')).toEqual({
-      reacted: true,
-      reaction_count: 1,
-    });
+  it('swaps the emoji without counting a second vote', async () => {
+    arrangeReact({ emoji: '❤️' });
+    dbMock.queueMany([], [{ reactionCount: 1 }]);
+
+    expect(await feed.react(ITEM, VIEWER, '🔥')).toEqual({ reacted: true, reaction_count: 1 });
+    // Only the emoji changes; the post's count is not touched.
+    expect(writesTo('update')).toEqual([feedReactions]);
+    expect(dbMock.called('insert')).toBe(false);
   });
 
-  it('leaves other people’s reactions untouched', async () => {
-    arrangeReact([reaction(OTHER, '❤️')]);
-    expect(await feed.react(ITEM, VIEWER, '❤️')).toEqual({
-      reacted: true,
-      reaction_count: 2,
-    });
-  });
+  it('locks your reaction row inside a transaction', async () => {
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
 
-  it('removing yours keeps everyone else’s', async () => {
-    arrangeReact([reaction(OTHER, '❤️'), reaction(VIEWER, '❤️')]);
-    expect(await feed.react(ITEM, VIEWER, '❤️')).toEqual({
-      reacted: false,
-      reaction_count: 1,
-    });
-  });
-
-  // The regression this whole change exists for: reacting used to append
-  // unconditionally, so one user tapping five times scored 5.
-  it('never lets one user drive the count above 1 on their own', async () => {
-    const seen = new Set<number>();
-    let stored: Row[] = [];
-
-    for (let i = 0; i < 10; i++) {
-      arrangeReact(stored);
-      const r = await feed.react(ITEM, VIEWER, '❤️');
-      seen.add(r.reaction_count);
-      stored = r.reacted ? [reaction(VIEWER, '❤️')] : [];
-    }
-
-    expect([...seen].sort()).toEqual([0, 1]);
-  });
-
-  it('writes a count equal to the number of stored reactions', async () => {
-    arrangeReact([reaction(OTHER, '❤️')]);
-    await feed.react(ITEM, VIEWER, '❤️');
-
-    const update = dbMock.trace.find((c) => c.method === 'set');
-    const payload = update?.args[0] as { reactions: Row[]; reactionCount: number };
-    expect(payload.reactionCount).toBe(payload.reactions.length);
-  });
-
-  // The count is derived from the array, so two concurrent reactions must not
-  // both compute it from the same stale copy.
-  it('takes a row lock before the read-modify-write', async () => {
-    arrangeReact([]);
     await feed.react(ITEM, VIEWER, '❤️');
     expect(dbMock.called('transaction')).toBe(true);
     expect(dbMock.called('for')).toBe(true);
+  });
+
+  /** Reacting used to read and rewrite the post's whole reactions array. */
+  it('never writes the old reactions array', async () => {
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
+
+    await feed.react(ITEM, VIEWER, '❤️');
+    const setKeys = dbMock.trace
+      .filter((c) => c.method === 'set')
+      .flatMap((c) => Object.keys(c.args[0] as object));
+    expect(setKeys).not.toContain('reactions');
   });
 });
 
 describe('FeedService.react — notifications', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  /**
-   * notifyOwner is deliberately fire-and-forget — a queue hiccup must not fail
-   * the reaction the user just made — so the call happens after react()
-   * resolves. Yielding the event loop lets it land before we assert.
-   *
-   * It reads the item's owner and the actor's display name, so both rows have
-   * to be queued behind the reaction reads — and behind the UPDATE, which is
-   * awaited and therefore drains a slot of its own.
-   */
-  const settle = () => new Promise((r) => setTimeout(r, 0));
-
-  /** The awaited UPDATE, then notifyOwner's owner and actor lookups. */
+  /** notifyOwner's owner and actor lookups, queued behind react's own reads. */
   const arrangeNotify = (ownerId: string) =>
-    dbMock.queueMany([], [{ ownerId }], [{ displayName: 'Viewer' }]);
+    dbMock.queueMany([{ ownerId }], [{ displayName: 'Viewer' }]);
 
   it('notifies the author of a genuinely new reaction', async () => {
-    arrangeReact([]);
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
     arrangeNotify(AUTHOR);
 
     await new FeedService().react(ITEM, VIEWER, '❤️');
@@ -153,28 +114,41 @@ describe('FeedService.react — notifications', () => {
     );
   });
 
+  /** The double-tap race: the second insert hits the primary key. */
+  it('stays quiet when the insert lost a race, and counts nothing', async () => {
+    arrangeReact(null);
+    dbMock.queueMany([], [{ reactionCount: 1 }]);
+
+    expect(await new FeedService().react(ITEM, VIEWER, '❤️'))
+      .toEqual({ reacted: true, reaction_count: 1 });
+    await settle();
+    expect(enqueueNotification).not.toHaveBeenCalled();
+  });
+
   it('stays quiet when the reaction is being withdrawn', async () => {
-    arrangeReact([reaction(VIEWER, '❤️')]);
+    arrangeReact({ emoji: '❤️' });
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 0 }]);
     await new FeedService().react(ITEM, VIEWER, '❤️');
     await settle();
     expect(enqueueNotification).not.toHaveBeenCalled();
   });
 
   it('stays quiet when only the emoji changed', async () => {
-    arrangeReact([reaction(VIEWER, '❤️')]);
+    arrangeReact({ emoji: '❤️' });
+    dbMock.queueMany([], [{ reactionCount: 1 }]);
     await new FeedService().react(ITEM, VIEWER, '🔥');
     await settle();
     expect(enqueueNotification).not.toHaveBeenCalled();
   });
 
   it('does not notify you about your own reaction', async () => {
-    arrangeReact([]);
-    // The item's owner is the actor, so notifyOwner must bail out.
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
+    // The post's owner is the actor, so notifyOwner must bail out.
     arrangeNotify(VIEWER);
 
     await new FeedService().react(ITEM, VIEWER, '❤️');
     await settle();
-
     expect(enqueueNotification).not.toHaveBeenCalled();
   });
 });
@@ -182,23 +156,23 @@ describe('FeedService.react — notifications', () => {
 describe('FeedService.react — access control', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('404s on an unknown feed item', async () => {
+  // One query answers both "no such post" and "not yours to see", and both get
+  // 404 rather than 403 so post ids cannot be probed for existence.
+  it('404s when the post is unknown or not visible to this viewer', async () => {
     dbMock.reset();
     dbMock.queueRows([]);
-    await expect(new FeedService().react(ITEM, VIEWER, '❤️')).rejects.toMatchObject({
-      statusCode: 404,
-    });
+
+    await expect(new FeedService().react(ITEM, VIEWER, '❤️'))
+      .rejects.toMatchObject({ statusCode: 404 });
+    expect(dbMock.called('transaction')).toBe(false);
   });
 
-  // 404 rather than 403 so feed item ids cannot be probed for existence.
-  it('404s — not 403 — when the item is not visible to this viewer', async () => {
-    dbMock.reset();
-    dbMock.queueMany(
-      [{ userId: AUTHOR, visibility: 'friends', groupId: null }],
-      [], // no friendship between viewer and author
-    );
-    await expect(new FeedService().react(ITEM, VIEWER, '❤️')).rejects.toMatchObject({
-      statusCode: 404,
-    });
+  it('checks access in a single query', async () => {
+    arrangeReact(null);
+    dbMock.queueMany([{ userId: VIEWER }], [{ reactionCount: 1 }]);
+
+    await new FeedService().react(ITEM, VIEWER, '❤️');
+    const beforeTx = dbMock.trace.slice(0, dbMock.trace.findIndex((c) => c.method === 'transaction'));
+    expect(beforeTx.map((c) => c.method)).toEqual(['execute']);
   });
 });

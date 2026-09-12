@@ -39,27 +39,28 @@ beforeEach(() => {
 });
 
 describe('GET /feed item shape', () => {
-  it('emits exactly the fields the client parses', async () => {
-    const row = {
-      id: 'aaaaaaaa-1111-4111-8111-111111111111',
-      userId: VIEWER,
-      actorName: 'Alex Dsouza',
-      actorPhotoUrl: null,
-      type: 'task_completed',
-      title: 'Finish DBMS assignment',
-      summary: null,
-      metadata: {},
-      visibility: 'friends',
-      groupId: null,
-      reactionCount: 2,
-      reactions: [{ user_id: VIEWER, emoji: '❤️', created_at: 'x' }],
-      createdAt: new Date('2026-08-31T06:30:00.000Z'),
-    };
+  /** A row as the single page query returns it. */
+  const feedRow = (over: Record<string, unknown> = {}) => ({
+    id: 'aaaaaaaa-1111-4111-8111-111111111111',
+    user_id: VIEWER,
+    actor_name: 'Alex Dsouza',
+    actor_photo_url: null,
+    type: 'task_completed',
+    title: 'Finish DBMS assignment',
+    summary: null,
+    metadata: {},
+    visibility: 'friends',
+    group_id: null,
+    group_name: null,
+    reaction_count: 2,
+    reacted: true,
+    created_at_iso: '2026-08-31T06:30:00.000Z',
+    created_at_raw: '2026-08-31 06:30:00.000123',
+    ...over,
+  });
 
-    dbMock.queueMany(
-      [{ requesterId: VIEWER, addresseeId: VIEWER, status: 'accepted' }],
-      [row],
-    );
+  it('emits exactly the fields the client parses', async () => {
+    dbMock.queueRows([feedRow()]);
 
     const result = await new FeedService().getFeed(VIEWER, 'friends');
     const expected = fixture('feed_friends');
@@ -69,27 +70,17 @@ describe('GET /feed item shape', () => {
   });
 
   it('carries the group name on a group item so the two feeds are tellable apart', async () => {
-    const row = {
-      id: 'cccccccc-3333-4333-8333-333333333333',
-      userId: VIEWER,
-      actorName: 'Alex Dsouza',
-      actorPhotoUrl: null,
-      type: 'task_completed',
-      title: 'Revise normalization',
-      summary: null,
-      metadata: {},
-      visibility: 'group',
-      groupId: GROUP,
-      reactionCount: 0,
-      reactions: [],
-      createdAt: new Date('2026-08-31T06:31:00.000Z'),
-    };
-
-    dbMock.queueMany(
-      [{ groupId: GROUP }], // memberGroupIds
-      [row],
-      [{ id: GROUP, name: 'DBMS Study Group' }], // the group-name lookup
-    );
+    dbMock.queueRows([
+      feedRow({
+        id: 'cccccccc-3333-4333-8333-333333333333',
+        title: 'Revise normalization',
+        visibility: 'group',
+        group_id: GROUP,
+        group_name: 'DBMS Study Group',
+        reaction_count: 0,
+        reacted: false,
+      }),
+    ]);
 
     const result = await new FeedService().getFeed(VIEWER, 'groups');
 
@@ -100,59 +91,20 @@ describe('GET /feed item shape', () => {
     });
   });
 
+  /** Worked out in SQL now (an EXISTS on feed_reactions) and passed through. */
   it('reports whether this viewer already reacted', async () => {
-    const base = {
-      id: 'x',
-      userId: VIEWER,
-      actorName: 'A',
-      actorPhotoUrl: null,
-      type: 'task_completed',
-      title: 't',
-      summary: null,
-      metadata: {},
-      visibility: 'friends',
-      groupId: null,
-      reactionCount: 1,
-      createdAt: new Date(),
-    };
-
-    dbMock.queueMany(
-      [{ requesterId: VIEWER, addresseeId: VIEWER, status: 'accepted' }],
-      [{ ...base, reactions: [{ user_id: VIEWER, emoji: '❤️' }] }],
-    );
+    dbMock.queueRows([feedRow({ reacted: true })]);
     const mine = await new FeedService().getFeed(VIEWER, 'friends');
     expect(mine.items[0].reacted).toBe(true);
 
     dbMock.reset();
-    dbMock.queueMany(
-      [{ requesterId: VIEWER, addresseeId: VIEWER, status: 'accepted' }],
-      [{ ...base, reactions: [{ user_id: 'someone-else', emoji: '❤️' }] }],
-    );
+    dbMock.queueRows([feedRow({ reacted: false })]);
     const theirs = await new FeedService().getFeed(VIEWER, 'friends');
     expect(theirs.items[0].reacted).toBe(false);
   });
 
   it('no longer emits comment_count', async () => {
-    dbMock.queueMany(
-      [{ requesterId: VIEWER, addresseeId: VIEWER, status: 'accepted' }],
-      [
-        {
-          id: 'x',
-          userId: VIEWER,
-          actorName: 'A',
-          actorPhotoUrl: null,
-          type: 'task_completed',
-          title: 't',
-          summary: null,
-          metadata: {},
-          visibility: 'friends',
-          groupId: null,
-          reactionCount: 0,
-          reactions: [],
-          createdAt: new Date(),
-        },
-      ],
-    );
+    dbMock.queueRows([feedRow({ reaction_count: 0, reacted: false })]);
 
     const result = await new FeedService().getFeed(VIEWER, 'friends');
     expect(result.items[0]).not.toHaveProperty('comment_count');
