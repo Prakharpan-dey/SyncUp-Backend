@@ -53,6 +53,10 @@ const credentialRateLimit = {
     rateLimit: {
       max: 5,
       timeWindow: '15 minutes',
+      // After the body is parsed. The key includes the email, and at the
+      // default onRequest hook there is no body yet — so the email half was
+      // always empty and every email from one address shared five attempts.
+      hook: 'preHandler' as const,
       keyGenerator: (request: { ip: string; body?: unknown }) => {
         const email = (request.body as { email?: string } | undefined)?.email ?? '';
         return `${request.ip}:${email.toLowerCase()}`;

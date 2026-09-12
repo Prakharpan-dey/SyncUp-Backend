@@ -48,6 +48,8 @@ export async function accountRoutes(app: FastifyInstance) {
       rateLimit: {
         max: 5,
         timeWindow: '15 minutes',
+        // After the form body is parsed, or the email in the key is empty.
+        hook: 'preHandler' as const,
         keyGenerator: (request: { ip: string; body?: unknown }) => {
           const email = (request.body as { email?: string } | undefined)?.email ?? '';
           return `delete:${request.ip}:${email.toLowerCase()}`;
