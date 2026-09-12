@@ -22,9 +22,6 @@ export const feedItems = pgTable('feed_items', {
   visibility: feedVisibilityEnum('visibility').default('friends').notNull(),
   groupId: uuid('group_id'),
   reactionCount: integer('reaction_count').default(0).notNull(),
-  commentCount: integer('comment_count').default(0).notNull(),
-  reactions: jsonb('reactions').default([]),
-  comments: jsonb('comments').default([]),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
   // One friend's newest posts, already in page order: the feed walks this per

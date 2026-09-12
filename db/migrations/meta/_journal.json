@@ -50,6 +50,13 @@
       "when": 1789232669948,
       "tag": "0006_feed_reactions",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789235044749,
+      "tag": "0007_drop_feed_jsonb",
+      "breakpoints": true
     }
   ]
 }
