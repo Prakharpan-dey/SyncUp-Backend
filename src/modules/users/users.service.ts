@@ -6,6 +6,31 @@ import {
 import { eq, and, or, ne, exists, notExists, sql } from 'drizzle-orm';
 import { AppError } from '../../core/errors/app-errors.js';
 
+/**
+ * Where `currentUserId` stands with the `users` row being selected:
+ * 'friends', 'requested' (you asked), 'incoming' (they asked) or 'none'.
+ *
+ * The searched user's id is written out as "users"."id" rather than
+ * interpolated as a column. Interpolated, it came out without its table name,
+ * and inside this subquery a bare "id" is friendships.id — so the lookup never
+ * matched anyone and every result said 'none'.
+ */
+export function friendshipStatusSql(currentUserId: string) {
+  return sql<string>`COALESCE((
+    SELECT CASE
+      WHEN f.status = 'accepted' THEN 'friends'
+      WHEN f.requester_id = ${currentUserId} THEN 'requested'
+      ELSE 'incoming'
+    END
+    FROM friendships f
+    WHERE f.status IN ('accepted', 'pending') AND (
+      (f.requester_id = ${currentUserId} AND f.addressee_id = "users"."id") OR
+      (f.addressee_id = ${currentUserId} AND f.requester_id = "users"."id")
+    )
+    LIMIT 1
+  ), 'none')`;
+}
+
 export class UsersService {
   async getProfile(userId: string) {
     const [user] = await db
@@ -104,22 +129,7 @@ export class UsersService {
         ),
     );
 
-    // Where the caller stands with each result, so the app can show ADDED or
-    // REQUESTED instead of an ADD button that could only fail with
-    // "request already exists".
-    const friendshipStatus = sql<string>`COALESCE((
-      SELECT CASE
-        WHEN f.status = 'accepted' THEN 'friends'
-        WHEN f.requester_id = ${currentUserId} THEN 'requested'
-        ELSE 'incoming'
-      END
-      FROM friendships f
-      WHERE f.status IN ('accepted', 'pending') AND (
-        (f.requester_id = ${currentUserId} AND f.addressee_id = ${users.id}) OR
-        (f.addressee_id = ${currentUserId} AND f.requester_id = ${users.id})
-      )
-      LIMIT 1
-    ), 'none')`;
+    const friendshipStatus = friendshipStatusSql(currentUserId);
 
     const results = await db
       .select({ user: users, friendshipStatus })
