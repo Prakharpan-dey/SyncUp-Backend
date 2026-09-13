@@ -9,7 +9,7 @@ import { enqueueEmail } from '../../core/queues/email.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
 import { env } from '../../core/config/env.js';
 import { AuthTokenService } from './auth-token.service.js';
-import { verificationEmail, passwordResetEmail } from './emails/templates.js';
+import { verificationEmail, passwordResetEmail, emailChangedNotice } from './emails/templates.js';
 import { assertNotLockedOut, clearLoginFailures, recordLoginFailure } from './login-guard.js';
 
 /** The transaction handle Drizzle hands to `db.transaction`. */
@@ -654,6 +654,67 @@ export class AuthService {
     // Any reset link already in the user's inbox should stop working now that
     // they have demonstrably regained control of the account.
     await this.authTokens.invalidateOutstanding(userId, 'password_reset');
+  }
+
+  /**
+   * Moves the account to a new address.
+   *
+   * The password is re-checked, through the same lockout as sign-in: a stolen
+   * access token alone must not be enough to take over the address that
+   * password resets go to. The new address starts unverified and gets a
+   * confirmation link; the old one is told, and any reset link already sent
+   * there stops working.
+   */
+  async changeEmail(userId: string, newEmail: string, password: string, ip?: string) {
+    const [user] = await db.select().from(users)
+      .where(eq(users.id, userId)).limit(1);
+    if (!user) throw new AppError(404, 'User not found', 'NOT_FOUND');
+
+    if (!user.passwordHash) {
+      throw new AppError(400, 'This account signs in with Google', 'BAD_REQUEST');
+    }
+
+    await assertNotLockedOut(user.email, ip);
+    const valid = await comparePassword(password, user.passwordHash);
+    if (!valid) {
+      await recordLoginFailure(user.email, ip);
+      throw new AppError(401, 'Incorrect password', 'UNAUTHORIZED');
+    }
+
+    if (newEmail === user.email) {
+      throw new AppError(400, 'That is already your email', 'BAD_REQUEST', 'new_email');
+    }
+
+    const [taken] = await db.select({ id: users.id }).from(users)
+      .where(eq(users.email, newEmail)).limit(1);
+    if (taken) {
+      throw new AppError(409, 'Email already registered', 'CONFLICT', 'new_email');
+    }
+
+    let updated: typeof users.$inferSelect;
+    try {
+      [updated] = await db.update(users)
+        .set({ email: newEmail, emailVerifiedAt: null, updatedAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning();
+    } catch (error) {
+      // Two accounts racing for the same address: the unique index decides.
+      if (isUniqueViolation(error)) {
+        throw new AppError(409, 'Email already registered', 'CONFLICT', 'new_email');
+      }
+      throw error;
+    }
+
+    // The guard caches "verified"; drop it so the change applies immediately.
+    await invalidateAccountCache(userId);
+    await this.authTokens.invalidateOutstanding(userId, 'password_reset');
+    await this.sendVerificationEmail(updated);
+
+    const notice = emailChangedNotice({ displayName: user.displayName, newEmail });
+    await enqueueEmail({ to: user.email, subject: notice.subject, html: notice.html })
+      .catch(() => {});
+
+    return this.sanitizeUser(updated);
   }
 
   private async revokeAllSessions(userId: string) {

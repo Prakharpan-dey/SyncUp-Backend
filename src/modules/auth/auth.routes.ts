@@ -19,6 +19,7 @@ import {
   confirmTokenSchema,
   resetPasswordSchema,
   changePasswordSchema,
+  changeEmailSchema,
   logoutSchema,
   registerDeviceSchema,
   sessionIdParamSchema,
@@ -285,5 +286,21 @@ export async function authRoutes(app: FastifyInstance) {
       request.ip,
     );
     return reply.status(204).send();
+  });
+
+  // POST /auth/change-email — protected. The password is re-checked, and the
+  // new address starts unverified with a confirmation link sent to it.
+  app.post('/change-email', {
+    preHandler: [authGuard],
+    config: { rateLimit: { max: 5, timeWindow: '15 minutes', keyGenerator: accountOrIpKey } },
+  }, async (request, reply) => {
+    const body = changeEmailSchema.parse(request.body);
+    const user = await service.changeEmail(
+      request.userId,
+      body.new_email,
+      body.password,
+      request.ip,
+    );
+    return reply.send(user);
   });
 }

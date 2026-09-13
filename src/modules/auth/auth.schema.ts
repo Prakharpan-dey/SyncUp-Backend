@@ -130,3 +130,9 @@ export const changePasswordSchema = z.object({
   current_password: z.string().min(1).max(1024),
   new_password: passwordField,
 });
+
+/** Moving the account to another address: the password is re-checked. */
+export const changeEmailSchema = z.object({
+  new_email: emailField,
+  password: z.string().min(1).max(1024),
+});
