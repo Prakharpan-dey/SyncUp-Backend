@@ -120,9 +120,29 @@ export class TasksService {
 
     if (newStatus === 'completed') {
       void this.publishCompletion(userId, updated);
+    } else {
+      // Un-ticking takes the post back down, so ticking on and off cannot
+      // leave a trail of "Completed a task" in friends' feeds.
+      await this.retractCompletion(userId, taskId);
     }
 
     return this.serialize(updated);
+  }
+
+  /**
+   * Removes the "Completed a task" post for a task that was un-ticked, with
+   * its group copies. Best effort: the toggle itself has already happened.
+   */
+  private async retractCompletion(userId: string, taskId: string) {
+    try {
+      await db.execute(sql`
+        DELETE FROM feed_items
+        WHERE user_id = ${userId} AND type = 'task_completed'
+          AND metadata->>'task_id' = ${taskId}
+      `);
+    } catch (err) {
+      console.error('[Tasks] Failed to retract feed item:', err);
+    }
   }
 
   /**
@@ -138,7 +158,7 @@ export class TasksService {
    */
   private async publishCompletion(
     userId: string,
-    task: { title: string; sharingOverride: string | null },
+    task: { id: string; title: string; sharingOverride: string | null },
   ) {
     try {
       const [user] = await db
@@ -161,6 +181,9 @@ export class TasksService {
         type: 'task_completed',
         // 'summary' sharing announces the event without naming the task.
         title: sharing === 'summary' ? 'Completed a task' : task.title,
+        // Lets the worker keep it to one post per task, and lets an
+        // un-tick find the post to take down.
+        metadata: { task_id: task.id },
       });
     } catch (err) {
       console.error('[Tasks] Failed to enqueue feed item:', err);
