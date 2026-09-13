@@ -104,8 +104,25 @@ export class UsersService {
         ),
     );
 
+    // Where the caller stands with each result, so the app can show ADDED or
+    // REQUESTED instead of an ADD button that could only fail with
+    // "request already exists".
+    const friendshipStatus = sql<string>`COALESCE((
+      SELECT CASE
+        WHEN f.status = 'accepted' THEN 'friends'
+        WHEN f.requester_id = ${currentUserId} THEN 'requested'
+        ELSE 'incoming'
+      END
+      FROM friendships f
+      WHERE f.status IN ('accepted', 'pending') AND (
+        (f.requester_id = ${currentUserId} AND f.addressee_id = ${users.id}) OR
+        (f.addressee_id = ${currentUserId} AND f.requester_id = ${users.id})
+      )
+      LIMIT 1
+    ), 'none')`;
+
     const results = await db
-      .select()
+      .select({ user: users, friendshipStatus })
       .from(users)
       .where(
         and(
@@ -123,12 +140,14 @@ export class UsersService {
       )
       .limit(1);
 
-    return results.map((u) => ({
+    return results.map(({ user: u, friendshipStatus: status }) => ({
       id: u.id,
       username: u.username,
       display_name: u.displayName,
       photo_url: u.photoUrl,
       college: u.college,
+      // 'friends' | 'requested' (you asked) | 'incoming' (they asked) | 'none'
+      friendship_status: status,
     }));
   }
 
