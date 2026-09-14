@@ -24,6 +24,19 @@ export async function notificationRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
+  // Marking read left every notification in the list for good; the app had
+  // no way to actually clear one.
+  app.delete('/:id', async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    await service.remove(id, request.userId);
+    return reply.status(204).send();
+  });
+
+  app.delete('/', async (request, reply) => {
+    await service.clear(request.userId);
+    return reply.status(204).send();
+  });
+
   app.get('/unread-count', async (request, reply) => {
     const result = await service.getUnreadCount(request.userId);
     return reply.send(result);

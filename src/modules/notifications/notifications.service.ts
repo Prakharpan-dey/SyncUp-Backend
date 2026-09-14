@@ -31,6 +31,19 @@ export class NotificationsService {
       .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
   }
 
+  /** Swiping one away in the app. Someone else's id reads as not found. */
+  async remove(notificationId: string, userId: string) {
+    const [deleted] = await db.delete(notifications)
+      .where(and(eq(notifications.id, notificationId), eq(notifications.userId, userId)))
+      .returning({ id: notifications.id });
+    if (!deleted) throw new AppError(404, 'Notification not found', 'NOT_FOUND');
+  }
+
+  /** Clears the whole inbox. */
+  async clear(userId: string) {
+    await db.delete(notifications).where(eq(notifications.userId, userId));
+  }
+
   async getUnreadCount(userId: string) {
     const [result] = await db.select({ count: count() }).from(notifications)
       .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
