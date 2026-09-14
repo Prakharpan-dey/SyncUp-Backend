@@ -315,6 +315,43 @@ export class SocialService {
   }
 
   /** Tells everyone who can answer a join request that one is waiting. */
+  /**
+   * Tells whoever runs the group now — the owner and any admins, or the new
+   * owner if the owner was the one who left — that someone left. Nobody hears
+   * anything when the last member leaves, since the group goes with them.
+   * Fire-and-forget: the leave has already happened.
+   */
+  private async notifyMemberLeft(group: { id: string; name: string }, leaverId: string) {
+    try {
+      const [current] = await db.select({ ownerId: groups.ownerId }).from(groups)
+        .where(eq(groups.id, group.id)).limit(1);
+      if (!current) return;
+
+      const [leaver] = await db
+        .select({ displayName: users.displayName, username: users.username })
+        .from(users).where(eq(users.id, leaverId)).limit(1);
+      if (!leaver) return;
+
+      const admins = await db.select({ userId: groupMembers.userId }).from(groupMembers)
+        .where(and(
+          eq(groupMembers.groupId, group.id),
+          inArray(groupMembers.role, ['owner', 'admin']),
+        ));
+      const recipients = new Set([current.ownerId, ...admins.map((a) => a.userId)]);
+      recipients.delete(leaverId);
+
+      await Promise.all([...recipients].map((userId) => enqueueNotification({
+        userId,
+        type: 'group_request',
+        title: `${leaver.displayName} left ${group.name}`,
+        body: `@${leaver.username} is no longer in the group`,
+        deepLink: `/feed/groups/${group.id}`,
+      })));
+    } catch (err) {
+      console.error('[Social] Failed to enqueue member-left notification:', err);
+    }
+  }
+
   private async notifyGroupAdmins(
     group: { id: string; name: string; ownerId: string },
     requesterId: string,
@@ -599,6 +636,9 @@ export class SocialService {
           eq(groupMembers.userId, successor.userId),
         ));
     });
+
+    // Whoever runs the group now hears about it. Nothing told them before.
+    void this.notifyMemberLeft(group, userId);
   }
 
   async removeMember(groupId: string, memberId: string, callerUserId: string) {
