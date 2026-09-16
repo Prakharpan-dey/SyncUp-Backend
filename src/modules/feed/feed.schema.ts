@@ -26,5 +26,5 @@ export const sharePlanSchema = z.object({
       done: z.boolean(),
     }))
     .min(1)
-    .max(50),
+    .max(200),
 });

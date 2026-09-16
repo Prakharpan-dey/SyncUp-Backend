@@ -72,7 +72,6 @@ describe('what the card carries', () => {
         total: 2,
         done: 1,
         items: twoTasks,
-        truncated: false,
       },
     });
   });
@@ -84,8 +83,8 @@ describe('what the card carries', () => {
     expect(valuesArg()).toMatchObject({ actorName: 'Rhea' });
   });
 
-  // A forty-task day should not dominate a friend's feed or bloat the column.
-  it('caps the lines it carries and says it truncated', async () => {
+  // Cut at ten, friends saw "+2 more" on a twelve-task day shared in full.
+  it('carries every task, not the first ten', async () => {
     const many = Array.from({ length: 25 }, (_, i) => ({
       title: `Task $${i}`,
       done: false,
@@ -94,17 +93,8 @@ describe('what the card carries', () => {
     await service.shareDailyPlan('u1', plan(many));
 
     const metadata = valuesArg().metadata as Record<string, unknown>;
-    expect((metadata.items as unknown[]).length).toBe(10);
-    expect(metadata.truncated).toBe(true);
-    // The counts describe the whole day, not just the visible lines.
+    expect(metadata.items).toEqual(many);
     expect(metadata.total).toBe(25);
-  });
-
-  it('does not flag truncation when everything fits', async () => {
-    dbMock.queueMany([author()], [], [storedRow()]);
-    await service.shareDailyPlan('u1', plan(twoTasks));
-
-    expect((valuesArg().metadata as Record<string, unknown>).truncated).toBe(false);
   });
 });
 
@@ -176,7 +166,7 @@ describe('the request shape', () => {
     expect(sharePlanSchema.safeParse({ date: '2026-09-05', items: [] }).success).toBe(false);
     expect(sharePlanSchema.safeParse({
       date: '2026-09-05',
-      items: Array.from({ length: 51 }, () => ({ title: 'x', done: false })),
+      items: Array.from({ length: 201 }, () => ({ title: 'x', done: false })),
     }).success).toBe(false);
   });
 
@@ -191,5 +181,8 @@ describe('the request shape', () => {
     const { sharePlanSchema } = await import('../../src/modules/feed/feed.schema.js');
 
     expect(sharePlanSchema.safeParse(plan(twoTasks)).success).toBe(true);
+    // A busy day of more than fifty tasks was rejected outright.
+    const busyDay = Array.from({ length: 60 }, (_, i) => ({ title: `Task ${i}`, done: false }));
+    expect(sharePlanSchema.safeParse(plan(busyDay)).success).toBe(true);
   });
 });

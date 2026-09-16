@@ -5,7 +5,6 @@ import { enqueueNotification } from '../../core/queues/notification.queue.js';
 import { AppError } from '../../core/errors/app-errors.js';
 
 /** How many plan lines travel in a feed card. */
-const PLAN_ITEM_LIMIT = 10;
 
 const PLAN_TITLE = "Shared today's plan";
 
@@ -370,16 +369,14 @@ export class FeedService {
 
     const total = data.items.length;
     const done = data.items.filter((i) => i.done).length;
-    // Capped so one person's forty-task day cannot dominate a friend's feed or
-    // bloat the jsonb column.
-    const shown = data.items.slice(0, PLAN_ITEM_LIMIT);
-
+    // Every task, as previewed. Cutting the card at ten left friends reading
+    // "+2 more" on a day the author had shared in full; the schema's bound on
+    // items is what keeps the column in check.
     const metadata = {
       date: data.date,
       total,
       done,
-      items: shown,
-      truncated: total > shown.length,
+      items: data.items,
     };
     const summary = `${done} of ${total} done`;
 
