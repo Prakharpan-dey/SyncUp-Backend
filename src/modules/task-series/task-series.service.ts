@@ -138,7 +138,19 @@ export class TaskSeriesService {
       .delete(taskSeries)
       .where(and(eq(taskSeries.id, seriesId), eq(taskSeries.userId, userId)))
       .returning();
-    if (!deleted) throw new AppError(404, 'Series not found', 'NOT_FOUND');
+
+    if (!deleted) {
+      // The rule is already gone — or never reached the server — but its days
+      // did. Answering 404 left them behind, and the app pulled them straight
+      // back after every delete: a repeating task that could not be deleted.
+      // Only a series this account has nothing of is really not found.
+      const [orphan] = await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(and(eq(tasks.seriesId, seriesId), eq(tasks.userId, userId)))
+        .limit(1);
+      if (!orphan) throw new AppError(404, 'Series not found', 'NOT_FOUND');
+    }
 
     if (deletePending) {
       await db.delete(tasks).where(and(

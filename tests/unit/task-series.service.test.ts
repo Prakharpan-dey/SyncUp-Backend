@@ -139,6 +139,21 @@ describe('changing a series', () => {
     expect(set).toMatchObject({ seriesId: null });
   });
 
+  /**
+   * The rule was missing on the server while its days were not. The delete
+   * answered 404 and left them, so every pull brought the task back.
+   */
+  it('still clears the days of a series the server no longer has', async () => {
+    dbMock.queueMany([], [{ id: 't1' }], [], []);
+    await expect(service.deleteSeries('s1', 'u1', { deletePending: true }))
+      .resolves.toBeUndefined();
+
+    // The series delete that matched nothing, then the pending days.
+    expect(dbMock.trace.filter((c) => c.method === 'delete')).toHaveLength(2);
+    const set = dbMock.trace.find((c) => c.method === 'set')?.args[0] as Record<string, unknown>;
+    expect(set).toMatchObject({ seriesId: null });
+  });
+
   it('touches nothing when the series belongs to someone else', async () => {
     dbMock.queueRows([]);
     await expect(service.deleteSeries('s1', 'u2')).rejects.toThrow();
