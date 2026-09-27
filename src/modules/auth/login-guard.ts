@@ -54,20 +54,44 @@ async function read(key: string): Promise<number> {
   return Number(await redis.get(key)) || 0;
 }
 
+/**
+ * Reads several counters in one command.
+ *
+ * These keys only exist once someone has failed, so the reads almost always
+ * find nothing — but they are issued on every sign-in, password change and
+ * account deletion. Three `GET`s was three billed commands to learn the same
+ * thing one `MGET` does.
+ */
+async function readMany(keys: string[]): Promise<number[]> {
+  const values = await redis.mget(...keys);
+  return values.map((v) => Number(v) || 0);
+}
+
 /** Counts one more, starting the window on the first. */
 async function bump(key: string, windowSeconds: number): Promise<void> {
   const count = await redis.incr(key);
   if (count === 1) await redis.expire(key, windowSeconds);
 }
 
+/** Counts several, in one round trip. `EXPIRE` with `NX` sets the window only
+ *  on the first failure, which is what made the read-back of `INCR` necessary. */
+async function bumpMany(entries: [key: string, windowSeconds: number][]): Promise<void> {
+  const pipeline = redis.pipeline();
+  for (const [key, windowSeconds] of entries) {
+    pipeline.incr(key);
+    pipeline.expire(key, windowSeconds, 'NX');
+  }
+  await pipeline.exec();
+}
+
 /** Throws 429 once any of the three counters is spent. Call before comparing. */
 export async function assertNotLockedOut(email: string, ip?: string): Promise<void> {
   let counts: number[];
   try {
-    counts = await Promise.all([
-      read(loginGuardKeys.emailAndIp(email, ip)),
-      read(loginGuardKeys.email(email)),
-      read(loginGuardKeys.ip(ip)),
+    counts = await readMany([
+      loginGuardKeys.emailAndIp(email, ip),
+      loginGuardKeys.email(email),
+      loginGuardKeys.ip(ip),
     ]);
   } catch {
     return;
@@ -86,10 +110,10 @@ export async function assertNotLockedOut(email: string, ip?: string): Promise<vo
 /** Records a wrong password (or an unknown email) against all three counters. */
 export async function recordLoginFailure(email: string, ip?: string): Promise<void> {
   try {
-    await Promise.all([
-      bump(loginGuardKeys.emailAndIp(email, ip), EMAIL_IP_FAIL_WINDOW_SECONDS),
-      bump(loginGuardKeys.email(email), EMAIL_FAIL_WINDOW_SECONDS),
-      bump(loginGuardKeys.ip(ip), IP_FAIL_WINDOW_SECONDS),
+    await bumpMany([
+      [loginGuardKeys.emailAndIp(email, ip), EMAIL_IP_FAIL_WINDOW_SECONDS],
+      [loginGuardKeys.email(email), EMAIL_FAIL_WINDOW_SECONDS],
+      [loginGuardKeys.ip(ip), IP_FAIL_WINDOW_SECONDS],
     ]);
   } catch {
     // Not worth failing the request over.

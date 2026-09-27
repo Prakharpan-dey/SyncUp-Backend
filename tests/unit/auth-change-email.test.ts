@@ -103,7 +103,7 @@ describe('changing your email', () => {
 
     await expect(auth.changeEmail(USER, NEW, 'wrong', '203.0.113.7'))
       .rejects.toMatchObject({ statusCode: 401 });
-    expect(redis.incr).toHaveBeenCalled();
+    expect(redis.pipeline).toHaveBeenCalled(); // the counters were bumped
     expect(dbMock.called('update')).toBe(false);
     expect(enqueueEmail).not.toHaveBeenCalled();
   });

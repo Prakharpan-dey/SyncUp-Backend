@@ -43,13 +43,22 @@ delete process.env.SMTP_PASS;
  * the rate limiter, and BullMQ's connection handles.
  */
 vi.mock('../src/core/redis/redis.js', () => {
+  // The login guard reads its three counters with one MGET and bumps them in
+  // one pipeline, so both have to exist here or every auth test throws.
+  const pipeline = {
+    incr: vi.fn(() => pipeline),
+    expire: vi.fn(() => pipeline),
+    exec: vi.fn().mockResolvedValue([]),
+  };
   const client = {
     get: vi.fn().mockResolvedValue(null),
+    mget: vi.fn(async (...keys: string[]) => keys.map(() => null)),
     set: vi.fn().mockResolvedValue('OK'),
     setex: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(1),
     incr: vi.fn().mockResolvedValue(1),
     expire: vi.fn().mockResolvedValue(1),
+    pipeline: vi.fn(() => pipeline),
     quit: vi.fn().mockResolvedValue('OK'),
     on: vi.fn(),
     status: 'ready',

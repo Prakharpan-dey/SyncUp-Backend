@@ -19,7 +19,9 @@ const { AuthService } = await import('../../src/modules/auth/auth.service.js');
 const { accountOrIpKey } = await import('../../src/core/security/rate-limit-key.js');
 const { signAccessToken } = await import('../../src/core/utils/token.js');
 
-const r = redis as unknown as { get: Mock; incr: Mock; del: Mock; expire: Mock };
+const r = redis as unknown as {
+  get: Mock; mget: Mock; incr: Mock; del: Mock; expire: Mock; pipeline: Mock;
+};
 const { loginGuardKeys: keys } = guard;
 
 const EMAIL = 'rhea@example.com';
@@ -29,19 +31,46 @@ const USER = '11111111-0000-0000-0000-000000000001';
 
 /** Redis counters, simulated. */
 const store = new Map<string, number>();
+/** The expiry each counter carries, so "the window is set once" is testable. */
+const ttls = new Map<string, number>();
 
 beforeEach(() => {
   vi.clearAllMocks();
   dbMock.reset();
   store.clear();
-  r.get.mockImplementation(async (k: string) => (store.has(k) ? String(store.get(k)) : null));
-  r.incr.mockImplementation(async (k: string) => {
+  ttls.clear();
+  const read = (k: string) => (store.has(k) ? String(store.get(k)) : null);
+  const incr = (k: string) => {
     const n = (store.get(k) ?? 0) + 1;
     store.set(k, n);
     return n;
-  });
+  };
+
+  r.get.mockImplementation(async (k: string) => read(k));
+  // The guard reads its three counters in one MGET, not three GETs.
+  r.mget.mockImplementation(async (...ks: string[]) => ks.map(read));
+  r.incr.mockImplementation(async (k: string) => incr(k));
   r.del.mockImplementation(async (k: string) => Number(store.delete(k)));
   r.expire.mockResolvedValue(1);
+  // ...and bumps them in one pipeline. Queued commands are applied to the same
+  // store on exec, so the counting behaviour the tests assert is unchanged.
+  r.pipeline.mockImplementation(() => {
+    const queued: (() => void)[] = [];
+    const chain: Record<string, unknown> = {
+      incr: (k: string) => { queued.push(() => { incr(k); }); return chain; },
+      // Mirrors EXPIRE ... NX: the server refuses to touch a key that already
+      // has a window, which is what stops later failures extending it.
+      expire: (k: string, seconds: number, mode?: string) => {
+        queued.push(() => {
+          if (mode === 'NX' && ttls.has(k)) return;
+          ttls.set(k, seconds);
+        });
+        return chain;
+      },
+      exec: async () => { for (const run of queued) run(); return []; },
+    };
+    return chain;
+  });
 });
 
 async function fail(times: number, email = EMAIL, ip = ATTACKER) {
@@ -92,14 +121,48 @@ describe('the login lockout', () => {
     expect(store.get(keys.ip(HOME))).toBe(5);
   });
 
-  it('starts each window on the first failure only', async () => {
-    await fail(2);
-    expect(r.expire).toHaveBeenCalledTimes(3); // once per counter
+  /**
+   * The window starts on the first failure and is never pushed back by later
+   * ones — otherwise an attacker failing steadily would hold a victim's counter
+   * alive indefinitely. Redis enforces it now (EXPIRE ... NX) rather than the
+   * client reading INCR back, which also closes the gap where a crash between
+   * the two left a counter with no expiry at all.
+   */
+  it('starts each window on the first failure and never extends it', async () => {
+    await fail(1);
+    const afterFirst = new Map(ttls);
+    expect(afterFirst.size).toBe(3); // one window per counter
+
+    await fail(1);
+    expect(ttls).toEqual(afterFirst);
   });
 
+  /**
+   * Every sign-in, password change and account deletion reads these three
+   * counters, and they are nearly always absent — so this is the hot path, and
+   * it used to spend three commands to learn nothing. One MGET does it.
+   */
+  it('reads all three counters in a single command', async () => {
+    await guard.assertNotLockedOut(EMAIL, HOME);
+
+    expect(r.mget).toHaveBeenCalledTimes(1);
+    expect(r.mget).toHaveBeenCalledWith(
+      keys.emailAndIp(EMAIL, HOME),
+      keys.email(EMAIL),
+      keys.ip(HOME),
+    );
+    expect(r.get).not.toHaveBeenCalled();
+  });
+
+  // An outage must degrade to "no lockout", never to locking everyone out.
   it('fails open when Redis is down', async () => {
-    r.get.mockRejectedValue(new Error('ECONNRESET'));
+    r.mget.mockRejectedValue(new Error('ECONNRESET'));
     await expect(guard.assertNotLockedOut(EMAIL, ATTACKER)).resolves.toBeUndefined();
+  });
+
+  it('still records a failure without throwing when Redis is down', async () => {
+    r.pipeline.mockImplementation(() => { throw new Error('ECONNRESET'); });
+    await expect(guard.recordLoginFailure(EMAIL, ATTACKER)).resolves.toBeUndefined();
   });
 });
 

@@ -20,10 +20,15 @@ type AccountState = { exists: boolean; verified: boolean };
 
 const CACHE_PREFIX = 'auth:user:';
 /**
- * Short enough that a deletion or verification takes effect almost immediately,
- * long enough that a burst of requests costs one query rather than dozens.
+ * The TTL is a backstop, not how a change takes effect: `invalidateAccountCache`
+ * is called directly on deletion, verification and change-email, and writes
+ * through shared Redis so every instance sees it at once.
+ *
+ * At 30s it was short enough that opening a second screen already missed, so
+ * most requests paid for both the Redis lookup and the query it was meant to
+ * save.
  */
-const CACHE_TTL_SECONDS = 30;
+const CACHE_TTL_SECONDS = 300;
 
 async function loadAccountState(userId: string): Promise<AccountState> {
   const cacheKey = `${CACHE_PREFIX}${userId}`;
