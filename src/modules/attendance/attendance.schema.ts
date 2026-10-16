@@ -6,7 +6,9 @@ export const createSubjectSchema = z.object({
   // what lets later edits, deletes and logged classes find the row.
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(150),
-  code: z.string().max(30).optional(),
+  // The app sends null for a subject with no code. Rejecting it failed every
+  // such create with a 422, which the app treats as final and drops.
+  code: z.string().max(30).nullish(),
   threshold_pct: z.number().int().min(0).max(100).default(75),
 });
 

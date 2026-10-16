@@ -41,14 +41,14 @@ export class AttendanceService {
     });
   }
 
-  async createSubject(userId: string, data: { id?: string; name: string; code?: string; threshold_pct?: number }) {
+  async createSubject(userId: string, data: { id?: string; name: string; code?: string | null; threshold_pct?: number }) {
     // The server used to ignore the app's id and mint its own, so every later
     // request from the app (log a class, rename, delete) named a subject the
     // server had never heard of and failed with 404. No logged class ever
     // reached the server, and a reinstall lost all of them.
     const [subject] = await db.insert(subjects).values({
       ...(data.id ? { id: data.id } : {}),
-      userId, name: data.name, code: data.code,
+      userId, name: data.name, code: data.code ?? null,
       thresholdPct: data.threshold_pct ?? 75,
     }).onConflictDoNothing({ target: subjects.id }).returning();
 

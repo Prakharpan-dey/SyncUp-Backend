@@ -36,6 +36,13 @@ describe('subjects keep the id the app gave them', () => {
     expect(updateSubjectSchema.parse({ id: SUBJECT, name: 'DBMS' })).not.toHaveProperty('id');
   });
 
+  // The app sends null for a subject with no code; that was a 422, and the
+  // app drops a 422 for good.
+  it('accepts the null code the app sends, on create and update', () => {
+    expect(createSubjectSchema.parse({ id: SUBJECT, name: 'DBMS', code: null }).code).toBeNull();
+    expect(updateSubjectSchema.parse({ code: null }).code).toBeNull();
+  });
+
   it('inserts with that id', async () => {
     dbMock.queueRows([subjectRow()]);
     const created = await new AttendanceService().createSubject(ME, { id: SUBJECT, name: 'DBMS' });
