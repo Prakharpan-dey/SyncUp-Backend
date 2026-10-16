@@ -64,6 +64,7 @@ all of them; the essentials:
 | `PUBLIC_APP_URL` | in production | Emailed links are built from it, so a localhost value would be dead for whoever receives it |
 | `RESEND_API_KEY` / `SMTP_*` | for email | Needed by the **worker**, not the API |
 | `FIREBASE_SERVICE_ACCOUNT` | for push | Service account JSON on one line. Worker only |
+| `REPORTS_EMAIL` | no | Support inbox that in-app reports are mailed to. Unset, reports are stored but not mailed |
 | `DATABASE_POOL_MAX` | no | Per instance, default 10 |
 
 Without Firebase credentials notifications are still stored, just not pushed.
@@ -106,10 +107,11 @@ except where noted.
 | `/tasks` | Tasks, completion toggle, stats |
 | `/task-series` | Repeating rules; occurrences themselves are ordinary tasks |
 | `/subjects` | Attendance subjects and sessions |
-| `/friends` | Requests, responses, unfriend, block |
+| `/friends` | Requests, responses, unfriend, blocked list, unblock |
 | `/groups` | Groups, members, invites, join requests |
 | `/feed` | Friends and groups feed, daily plan sharing, reactions |
 | `/notifications` | List, mark read, delete, clear, unread count |
+| `/reports` | Report a person or a post. Stored in `reports` and mailed to `REPORTS_EMAIL` |
 
 `/feed`, `/friends` and `/groups` additionally require a verified email.
 

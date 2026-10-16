@@ -93,3 +93,34 @@ export function emailChangedNotice(opts: { displayName: string; newEmail: string
     }),
   };
 }
+
+/** To the support inbox: someone reported a person or a post in the app. */
+export function reportFiledEmail(opts: {
+  reportId: string;
+  reason: string;
+  details: string | null;
+  reporter: { id: string; username: string };
+  reported: { id: string; username: string; displayName: string };
+  post: { type: string; title: string; summary: string | null } | null;
+}) {
+  const row = (label: string, value: string) =>
+    `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}<br>`;
+  const post = opts.post
+    ? row('Post', `${opts.post.type} — ${opts.post.title}`) +
+      (opts.post.summary ? row('Post text', opts.post.summary) : '')
+    : row('Post', 'none (the person was reported)');
+  return {
+    subject: `[SyncUp report] ${opts.reason}: @${opts.reported.username}`,
+    html: layout({
+      heading: 'New report',
+      body:
+        row('Reason', opts.reason) +
+        row('Details', opts.details ?? '—') +
+        row('Reported', `@${opts.reported.username} (${opts.reported.displayName}) ${opts.reported.id}`) +
+        row('Reporter', `@${opts.reporter.username} ${opts.reporter.id}`) +
+        post +
+        row('Report id', opts.reportId),
+      footer: 'Review it, then set reports.status to actioned or dismissed.',
+    }),
+  };
+}

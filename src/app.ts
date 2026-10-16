@@ -10,6 +10,7 @@ import { errorHandler } from './core/middleware/error-handler.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { accountRoutes } from './modules/account/account.routes.js';
 import { legalRoutes } from './modules/legal/legal.routes.js';
+import { reportRoutes } from './modules/reports/reports.routes.js';
 import { userRoutes } from './modules/users/users.routes.js';
 import { taskRoutes } from './modules/tasks/tasks.routes.js';
 import { taskSeriesRoutes } from './modules/task-series/task-series.routes.js';
@@ -85,6 +86,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(groupRoutes, { prefix: '/groups' });
   await app.register(feedRoutes, { prefix: '/feed' });
   await app.register(notificationRoutes, { prefix: '/notifications' });
+  await app.register(reportRoutes, { prefix: '/reports' });
 
   return app;
 }

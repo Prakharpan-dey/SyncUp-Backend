@@ -151,7 +151,17 @@ function groupsPage(viewerId: string, cursor: FeedCursor | null, n: number): SQL
       SELECT fi.* FROM sources
       CROSS JOIN LATERAL (
         SELECT ${CARD_COLUMNS} FROM feed_items
-        WHERE group_id = sources.id AND visibility = 'group' ${afterCursor(cursor)}
+        WHERE group_id = sources.id AND visibility = 'group'
+          -- Sharing a group does not undo a block: neither side sees the
+          -- other's posts there, the same as on the Friends tab.
+          AND NOT EXISTS (
+            SELECT 1 FROM friendships b
+            WHERE b.status = 'blocked' AND (
+              (b.requester_id = ${viewerId} AND b.addressee_id = feed_items.user_id) OR
+              (b.addressee_id = ${viewerId} AND b.requester_id = feed_items.user_id)
+            )
+          )
+          ${afterCursor(cursor)}
         ORDER BY ${NEWEST_FIRST}
         LIMIT ${n}
       ) fi
@@ -171,7 +181,7 @@ export class FeedService {
    * uses. 404 rather than 403 so feed item ids cannot be probed for existence.
    * One query; it used to load every friend and group id first.
    */
-  private async assertCanAccessItem(feedItemId: string, userId: string) {
+  async assertCanAccessItem(feedItemId: string, userId: string) {
     const rows = (await db.execute(sql`
       SELECT 1 FROM feed_items fi
       WHERE fi.id = ${feedItemId} AND (

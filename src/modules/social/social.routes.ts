@@ -42,6 +42,12 @@ export async function socialRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
+  // Everyone the caller has blocked, for the app's Blocked users screen.
+  app.get('/blocked', async (request, reply) => {
+    const blocked = await service.listBlocked(request.userId);
+    return reply.send(blocked);
+  });
+
   // Undo a block. Scoped to the blocker — the blocked party cannot reach this.
   app.delete('/block/:id', async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);

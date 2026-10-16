@@ -33,6 +33,10 @@ const envSchema = z.object({
     SMTP_USER: z.string().optional(),
     SMTP_PASS: z.string().optional(),
     SMTP_FROM: z.string().optional(),
+
+    // Support inbox that in-app reports are emailed to. Unset, reports are
+    // still stored, just not mailed.
+    REPORTS_EMAIL: z.string().email().optional(),
 });
 
 /**

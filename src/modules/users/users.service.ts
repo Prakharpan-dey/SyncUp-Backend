@@ -187,18 +187,23 @@ export class UsersService {
 
     if (existing) return; // Already blocked
 
-    // Remove any existing friendship, insert block
+    // Remove any friendship or pending request, then insert the block. Their
+    // own block of us, if they made one, stays: deleting it here would let
+    // anyone lift a block against them by blocking back and then unblocking.
     await db
       .delete(friendships)
       .where(
-        or(
-          and(
-            eq(friendships.requesterId, currentUserId),
-            eq(friendships.addresseeId, targetUserId),
-          ),
-          and(
-            eq(friendships.requesterId, targetUserId),
-            eq(friendships.addresseeId, currentUserId),
+        and(
+          ne(friendships.status, 'blocked'),
+          or(
+            and(
+              eq(friendships.requesterId, currentUserId),
+              eq(friendships.addresseeId, targetUserId),
+            ),
+            and(
+              eq(friendships.requesterId, targetUserId),
+              eq(friendships.addresseeId, currentUserId),
+            ),
           ),
         ),
       );

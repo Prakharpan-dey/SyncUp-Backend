@@ -14,3 +14,4 @@ export * from './group-invites.js';
 export * from './feed-items.js';
 export * from './feed-reactions.js';
 export * from './notifications.js';
+export * from './reports.js';

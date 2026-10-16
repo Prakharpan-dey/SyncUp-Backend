@@ -106,6 +106,20 @@ export class SocialService {
     return { id: updated.id, status: updated.status };
   }
 
+  /** People the caller has blocked, newest first, for the Blocked users screen. */
+  async listBlocked(userId: string) {
+    const rows = await db
+      .select({ user: users, blockedAt: friendships.createdAt })
+      .from(friendships)
+      .innerJoin(users, eq(users.id, friendships.addresseeId))
+      .where(and(eq(friendships.requesterId, userId), eq(friendships.status, 'blocked')))
+      .orderBy(desc(friendships.createdAt));
+    return rows.map(({ user: u, blockedAt }) => ({
+      id: u.id, username: u.username, display_name: u.displayName, photo_url: u.photoUrl,
+      blocked_at: blockedAt.toISOString(),
+    }));
+  }
+
   /**
    * Removes a block the caller created. Only the blocker can undo it — the
    * blocked party must not be able to reach this.
