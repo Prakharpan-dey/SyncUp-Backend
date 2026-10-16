@@ -41,15 +41,28 @@ export class AttendanceService {
     });
   }
 
-  async createSubject(userId: string, data: { name: string; code?: string; threshold_pct?: number }) {
+  async createSubject(userId: string, data: { id?: string; name: string; code?: string; threshold_pct?: number }) {
+    // The server used to ignore the app's id and mint its own, so every later
+    // request from the app (log a class, rename, delete) named a subject the
+    // server had never heard of and failed with 404. No logged class ever
+    // reached the server, and a reinstall lost all of them.
     const [subject] = await db.insert(subjects).values({
+      ...(data.id ? { id: data.id } : {}),
       userId, name: data.name, code: data.code,
       thresholdPct: data.threshold_pct ?? 75,
-    }).returning();
-    return { id: subject.id, user_id: subject.userId, name: subject.name, code: subject.code,
-      threshold_pct: subject.thresholdPct, total_classes: 0, attended_classes: 0,
+    }).onConflictDoNothing({ target: subjects.id }).returning();
+
+    // Nothing inserted: a replay of a create that already landed. Hand back the
+    // caller's own row so the retry is idempotent, and refuse if the id is
+    // someone else's.
+    const row = subject ?? (await db.select().from(subjects)
+      .where(and(eq(subjects.id, data.id!), eq(subjects.userId, userId))).limit(1))[0];
+    if (!row) throw new AppError(409, 'Subject id already in use', 'CONFLICT');
+
+    return { id: row.id, user_id: row.userId, name: row.name, code: row.code,
+      threshold_pct: row.thresholdPct, total_classes: 0, attended_classes: 0,
       percentage: 0, classes_needed: 0, safe_to_skip: 0,
-      created_at: subject.createdAt.toISOString(), updated_at: subject.updatedAt.toISOString() };
+      created_at: row.createdAt.toISOString(), updated_at: row.updatedAt.toISOString() };
   }
 
   async updateSubject(subjectId: string, userId: string, data: Record<string, unknown>) {
@@ -88,20 +101,25 @@ export class AttendanceService {
     return sessions.map(s => ({
       id: s.id, subject_id: s.subjectId, session_date: s.sessionDate,
       status: s.status, created_at: s.createdAt.toISOString(),
+      updated_at: s.updatedAt.toISOString(),
     }));
   }
 
-  async logSession(subjectId: string, userId: string, data: { session_date: string; status: 'present' | 'absent' }) {
+  async logSession(subjectId: string, userId: string, data: { id?: string; session_date: string; status: 'present' | 'absent' }) {
     await this.assertSubjectOwnership(subjectId, userId);
 
+    // One row per subject per day. Marking a day again changes its status,
+    // and takes the app's id for it so a later delete from the app finds it.
     const [session] = await db.insert(attendanceSessions).values({
+      ...(data.id ? { id: data.id } : {}),
       subjectId, sessionDate: data.session_date, status: data.status,
     }).onConflictDoUpdate({
       target: [attendanceSessions.subjectId, attendanceSessions.sessionDate],
-      set: { status: data.status, updatedAt: new Date() },
+      set: { status: data.status, updatedAt: new Date(), ...(data.id ? { id: data.id } : {}) },
     }).returning();
     return { id: session.id, subject_id: session.subjectId, session_date: session.sessionDate,
-      status: session.status, created_at: session.createdAt.toISOString() };
+      status: session.status, created_at: session.createdAt.toISOString(),
+      updated_at: session.updatedAt.toISOString() };
   }
 
   async deleteSession(subjectId: string, sessionId: string, userId: string) {
